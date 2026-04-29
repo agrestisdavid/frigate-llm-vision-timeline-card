@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.35.1";
+const CARD_VERSION = "0.36.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1884,6 +1884,19 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     this._activeClip = null;
     this._clipUrl = null;
     this._clipError = null;
+    // Always return to live after closing a clip — also clear timeline
+    // selection so the VoD player doesn't take over instead.
+    if (this._config?.view_mode === "timeline") {
+      this._timelineSelected = false;
+      this._cleanupTimeline();
+      this._timelineHourStart = 0;
+      this._timelinePendingSeekSec = null;
+      this._timelinePlayerTime = 0;
+    }
+    if (!this._config?.multiview && !this._liveMode) {
+      const liveCam = this._resolveLiveCamera();
+      if (liveCam) this._openLive(liveCam);
+    }
   }
 
   async _initPlayer() {
@@ -3096,13 +3109,15 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
         <div class="timeline-marker-info">
           <div class="timeline-marker-info-top">
-            ${labelText ? this._renderLabelChip(rawLabel, labelText) : html`<span></span>`}
-            <span class="timeline-marker-time">${timeText}</span>
+            <span class="timeline-marker-title">${titleText}</span>
+            ${labelText ? this._renderLabelChip(rawLabel, labelText) : ""}
           </div>
-          <div class="timeline-marker-title">${titleText}</div>
-          ${description
-            ? html`<div class="timeline-marker-desc">${this._shortDesc(description)}</div>`
-            : ""}
+          <div class="timeline-marker-meta">
+            <span class="timeline-marker-time">${timeText}</span>
+            ${description
+              ? html`<span class="timeline-marker-desc"> · ${this._shortDesc(description)}</span>`
+              : ""}
+          </div>
         </div>
       </div>
     `;
@@ -4647,32 +4662,27 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         min-width: 0;
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 3px;
         padding: 1px 0;
         color: var(--primary-text-color, var(--text-primary));
       }
       .timeline-marker-info-top {
         display: flex;
         align-items: center;
-        justify-content: space-between;
         gap: 6px;
         min-height: 18px;
       }
       .timeline-marker-info-top .chip {
         font-size: 0.68em;
         padding: 2px 7px 2px 6px;
+        flex-shrink: 0;
       }
       .timeline-marker-info-top .chip .chip-icon {
         --mdc-icon-size: 12px;
       }
-      .timeline-marker-time {
-        font-size: 0.72em;
-        color: var(--secondary-text-color, var(--text-secondary));
-        font-variant-numeric: tabular-nums;
-        white-space: nowrap;
-        flex-shrink: 0;
-      }
       .timeline-marker-title {
+        flex: 1 1 auto;
+        min-width: 0;
         font-size: 0.85em;
         font-weight: 600;
         line-height: 1.2;
@@ -4681,14 +4691,25 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .timeline-marker-desc {
+      /* Time + description share one block, clamped to two lines */
+      .timeline-marker-meta {
         font-size: 0.74em;
-        line-height: 1.3;
+        line-height: 1.35;
         color: var(--secondary-text-color, var(--text-secondary));
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+        word-break: break-word;
+      }
+      .timeline-marker-time {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        color: var(--primary-text-color, var(--text-primary));
+        opacity: 0.85;
+      }
+      .timeline-marker-desc {
+        opacity: 0.95;
       }
       /* Connecting line from marker to its exact moment on the axis (subtle) */
       /* Position wrapper for both single markers and clusters */
