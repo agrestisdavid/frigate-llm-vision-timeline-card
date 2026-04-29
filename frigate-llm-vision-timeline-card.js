@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.43.1";
+const CARD_VERSION = "0.43.2";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -4459,16 +4459,23 @@ class FrigateLlmVisionTimelineCard extends LitElement {
          browser's top layer — escapes any parent that has transform /
          filter / will-change (which would otherwise pin position:fixed
          to the parent instead of the viewport, leaving the backdrop
-         only over the card). */
+         only over the card).
+         The dialog is explicitly sized to 100vw/100vh and inset:0 so
+         the inner content can be centered in the actual viewport via
+         flex (UA default would auto-size + add top margin, leaving
+         the popup floating near the top of the screen). */
       .lightbox {
         border: none;
         outline: none;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        max-width: 100vw;
+        max-height: 100vh;
         margin: 0;
         padding: 20px;
         background: transparent;
         color: inherit;
-        max-width: 100vw;
-        max-height: 100vh;
         box-sizing: border-box;
       }
       .lightbox[open] {
