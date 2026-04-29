@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.33.1";
+const CARD_VERSION = "0.34.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -3004,7 +3004,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
               : ""}
           </div>
           <div class="timeline-marker-lane timeline-${orientation}">
-            ${visibleEvents.map((ev) => this._renderTimelineMarker(ev, start, span, isSplit, lang))}
+            ${this._clusterTimelineEvents(visibleEvents, start, span).map(
+              (cluster) => this._renderTimelineCluster(cluster, isSplit, lang)
+            )}
           </div>
         </div>
         ${events.length === 0 && !this._timelineError
@@ -3042,26 +3044,45 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     return ticks;
   }
 
-  _renderTimelineMarker(ev, start, span, isSplit, lang) {
+  _clusterTimelineEvents(events, start, span) {
+    if (!events?.length) return [];
+    const positioned = events
+      .map((ev) => ({
+        ev,
+        pos: ((ev._ts.getTime() - start) / span) * 100,
+      }))
+      .sort((a, b) => a.pos - b.pos);
+    // Two events whose positions fall within this many % of the visible range
+    // are clustered. ~5% is ≈72min at 24h zoom, ≈3min at 1h zoom.
+    const threshold = 5;
+    const clusters = [];
+    let current = null;
+    for (const item of positioned) {
+      if (current && (item.pos - current.events[current.events.length - 1].pos) < threshold) {
+        current.events.push(item);
+      } else {
+        current = { events: [item], anchorPos: item.pos };
+        clusters.push(current);
+      }
+    }
+    return clusters;
+  }
+
+  _renderTimelineMarkerCard(ev, lang) {
     const t = this._t;
-    const ts = ev._ts.getTime();
-    const pos = ((ts - start) / span) * 100;
     const snapUrl = this._snapshotUrl(ev);
     const rawLabel = ev._llm?.label || ev._label || "";
-    const icon = labelIcon(rawLabel, this._config?.label_icons);
-    const color = labelColor(rawLabel, this._config?.label_colors);
     const labelText = translateLabel(rawLabel, lang);
     const titleText =
       translateLlmTitle(ev._llm?.title, lang) || labelText || t.event_label;
     const timeText = formatTime(ev._ts, t);
     const description = ev._llm?.description || "";
-    const styleParts = [];
-    styleParts.push(isSplit ? `top: ${pos}%;` : `left: ${pos}%;`);
-    if (color) styleParts.push(`--marker-color: ${color};`);
+    const color = labelColor(rawLabel, this._config?.label_colors);
+    const colorStyle = color ? `--marker-color: ${color};` : "";
     return html`
       <div
         class="timeline-marker"
-        style=${styleParts.join(" ")}
+        style=${colorStyle}
         @pointerdown=${(e) => e.stopPropagation()}
         @click=${(e) => { e.stopPropagation(); this._onTimelineMarkerClick(ev); }}
       >
@@ -3082,6 +3103,60 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  _renderTimelineCluster(cluster, isSplit, lang) {
+    const wrapperStyle = isSplit
+      ? `top: ${cluster.anchorPos}%;`
+      : `left: ${cluster.anchorPos}%;`;
+    if (cluster.events.length === 1) {
+      return html`
+        <div class="timeline-marker-pos" style=${wrapperStyle}>
+          ${this._renderTimelineMarkerCard(cluster.events[0].ev, lang)}
+        </div>
+      `;
+    }
+    return html`
+      <div
+        class="timeline-cluster"
+        style=${wrapperStyle}
+        tabindex="0"
+        @pointerdown=${(e) => e.stopPropagation()}
+        @click=${(e) => this._onClusterClick(e)}
+      >
+        ${cluster.events.map(({ ev }, i) => html`
+          <div class="timeline-cluster-item" style=${`--stack-index: ${i};`}>
+            ${this._renderTimelineMarkerCard(ev, lang)}
+          </div>
+        `)}
+        <div class="timeline-cluster-badge" aria-hidden="true">+${cluster.events.length - 1}</div>
+      </div>
+    `;
+  }
+
+  _onClusterClick(e) {
+    // Tap on a collapsed cluster expands it without opening any clip; once
+    // expanded, the inner markers handle their own clicks normally.
+    const cluster = e.currentTarget;
+    const target = e.target.closest(".timeline-cluster-item");
+    const wasExpanded = cluster.classList.contains("expanded");
+    if (!wasExpanded) {
+      cluster.classList.add("expanded");
+      e.stopPropagation();
+      e.preventDefault();
+      const collapse = (ev2) => {
+        if (cluster.contains(ev2.target)) return;
+        cluster.classList.remove("expanded");
+        document.removeEventListener("pointerdown", collapse, true);
+      };
+      document.addEventListener("pointerdown", collapse, true);
+      return;
+    }
+    // Already expanded — let the marker click bubble up if user tapped one.
+    if (!target) {
+      cluster.classList.remove("expanded");
+      e.stopPropagation();
+    }
   }
 
   _renderEventList(filtered) {
@@ -4511,9 +4586,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         transform: translateY(-1px);
       }
       .timeline-marker {
-        position: absolute;
         --marker-color: var(--accent);
-        z-index: 2;
+        position: relative;
+        width: 100%;
         display: flex;
         gap: 10px;
         align-items: stretch;
@@ -4525,6 +4600,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         cursor: pointer;
         transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
         overflow: hidden;
+        box-sizing: border-box;
+      }
+      .timeline-marker:hover {
+        border-color: var(--marker-color);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
       }
       .timeline-marker-thumb {
         position: relative;
@@ -4597,50 +4677,115 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         overflow: hidden;
       }
       /* Connecting line from marker to its exact moment on the axis (subtle) */
-      .timeline-marker::before {
-        content: "";
+      /* Position wrapper for both single markers and clusters */
+      .timeline-marker-pos,
+      .timeline-cluster {
         position: absolute;
-        background: color-mix(in srgb, var(--marker-color) 70%, transparent);
-        z-index: -1;
+        z-index: 2;
       }
-      /* Markers live inside .timeline-marker-lane and are positioned by left/top % */
-      .timeline-marker-lane.timeline-horizontal .timeline-marker {
+      .timeline-marker-lane.timeline-horizontal .timeline-marker-pos,
+      .timeline-marker-lane.timeline-horizontal .timeline-cluster {
         top: 14px;
         transform: translateX(-50%);
-        width: 220px;
-        max-width: 220px;
+        width: calc(100% - 24px);
+        max-width: min(280px, calc(100% - 24px));
       }
-      .timeline-marker-lane.timeline-horizontal .timeline-marker::before {
+      .timeline-marker-lane.timeline-vertical .timeline-marker-pos,
+      .timeline-marker-lane.timeline-vertical .timeline-cluster {
+        left: 14px;
+        transform: translateY(-50%);
+        width: calc(100% - 22px);
+      }
+      /* Connecting line — drawn on the wrapper so cluster stacks share one line */
+      .timeline-marker-pos::before,
+      .timeline-cluster::before {
+        content: "";
+        position: absolute;
+        background: color-mix(in srgb, var(--marker-color, var(--accent)) 70%, transparent);
+        z-index: 0;
+      }
+      .timeline-marker-lane.timeline-horizontal .timeline-marker-pos::before,
+      .timeline-marker-lane.timeline-horizontal .timeline-cluster::before {
         left: 50%;
         bottom: 100%;
         width: 2px;
         height: 14px;
         transform: translateX(-50%);
       }
-      .timeline-marker-lane.timeline-horizontal .timeline-marker:hover {
-        transform: translateX(-50%) translateY(-1px);
-        border-color: var(--marker-color);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
-        z-index: 4;
-      }
-      .timeline-marker-lane.timeline-vertical .timeline-marker {
-        left: 14px;
-        transform: translateY(-50%);
-        width: calc(100% - 22px);
-        max-width: 280px;
-      }
-      .timeline-marker-lane.timeline-vertical .timeline-marker::before {
+      .timeline-marker-lane.timeline-vertical .timeline-marker-pos::before,
+      .timeline-marker-lane.timeline-vertical .timeline-cluster::before {
         top: 50%;
         right: 100%;
         height: 2px;
         width: 14px;
         transform: translateY(-50%);
       }
-      .timeline-marker-lane.timeline-vertical .timeline-marker:hover {
-        transform: translateY(-50%) translateX(2px);
-        border-color: var(--marker-color);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
-        z-index: 4;
+      /* Single-marker hover lift */
+      .timeline-marker-lane.timeline-horizontal .timeline-marker-pos:hover {
+        z-index: 6;
+      }
+      .timeline-marker-lane.timeline-vertical .timeline-marker-pos:hover {
+        z-index: 6;
+      }
+
+      /* Cluster: stacked cards (default) → fan out on hover/focus/expand */
+      .timeline-cluster {
+        --stack-collapsed-offset: 5px;
+        --stack-expanded-gap: 8px;
+        --marker-color: var(--accent);
+      }
+      .timeline-cluster:hover,
+      .timeline-cluster:focus-within,
+      .timeline-cluster.expanded {
+        z-index: 8;
+      }
+      .timeline-cluster-item {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        z-index: calc(50 - var(--stack-index));
+        transform:
+          translateY(calc(var(--stack-index) * var(--stack-collapsed-offset)))
+          scale(calc(1 - var(--stack-index) * 0.04));
+        opacity: calc(1 - clamp(0, var(--stack-index) * 0.18, 0.7));
+        transition:
+          transform 220ms cubic-bezier(.2,.7,.2,1),
+          opacity 200ms ease;
+      }
+      .timeline-cluster-item:first-child { position: relative; }
+      /* Hide stack tilt for items beyond first when not expanded */
+      .timeline-cluster-item:not(:first-child) { pointer-events: none; }
+      .timeline-cluster:hover .timeline-cluster-item,
+      .timeline-cluster:focus-within .timeline-cluster-item,
+      .timeline-cluster.expanded .timeline-cluster-item {
+        transform: translateY(calc(var(--stack-index) * (var(--marker-card-height, 76px) + var(--stack-expanded-gap))));
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .timeline-cluster-badge {
+        position: absolute;
+        top: -7px;
+        right: -7px;
+        min-width: 22px;
+        height: 22px;
+        padding: 0 7px;
+        border-radius: 999px;
+        background: var(--marker-color, var(--accent));
+        color: var(--text-primary-color, #fff);
+        font-size: 0.72em;
+        font-weight: 700;
+        line-height: 22px;
+        text-align: center;
+        z-index: 100;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+        pointer-events: none;
+        transition: opacity 150ms ease;
+      }
+      .timeline-cluster:hover .timeline-cluster-badge,
+      .timeline-cluster:focus-within .timeline-cluster-badge,
+      .timeline-cluster.expanded .timeline-cluster-badge {
+        opacity: 0;
       }
 
       .timeline-debug {
