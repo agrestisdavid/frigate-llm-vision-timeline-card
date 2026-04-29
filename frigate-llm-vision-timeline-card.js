@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.36.0";
+const CARD_VERSION = "0.36.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1875,7 +1875,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     }
   }
 
-  _closeClip() {
+  _disposeActiveClip() {
     this._cleanupVideoEl(this.renderRoot?.querySelector("video.player"));
     if (this._hls) {
       this._hls.destroy();
@@ -1884,8 +1884,12 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     this._activeClip = null;
     this._clipUrl = null;
     this._clipError = null;
-    // Always return to live after closing a clip — also clear timeline
-    // selection so the VoD player doesn't take over instead.
+  }
+
+  _closeClip() {
+    this._disposeActiveClip();
+    // Always return to live after a user-driven clip close — also clear any
+    // timeline selection so the VoD player doesn't take over instead.
     if (this._config?.view_mode === "timeline") {
       this._timelineSelected = false;
       this._cleanupTimeline();
@@ -2046,7 +2050,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       this._liveError = this._t.live_no_camera;
       return;
     }
-    this._closeClip();
+    this._disposeActiveClip();
     this._liveMode = true;
     this._liveCamera = cam;
     this._liveError = null;
@@ -2199,7 +2203,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       info.moved = true;
       info.target.classList.add("timeline-track--dragging");
       // Switch back to VoD on drag start if a clip was playing
-      if (this._activeClip) this._closeClip();
+      if (this._activeClip) this._disposeActiveClip();
     }
     if (!info.moved) return;
     const trackSize = info.isVertical ? info.rect.height : info.rect.width;
@@ -2277,7 +2281,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
 
   async _initTimeline() {
     if (this._config?.view_mode !== "timeline") return;
-    this._closeClip();
+    this._disposeActiveClip();
     const cam = this._resolveTimelineCamera();
     if (!cam) {
       this._timelineError = this._t.timeline_no_camera;
@@ -2573,7 +2577,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const target = e.currentTarget;
     if (!target) return;
     // Switch back to VoD if a single clip was active
-    if (this._activeClip) this._closeClip();
+    if (this._activeClip) this._disposeActiveClip();
     // Auswahl gesetzt → wechselt von Live zur Timeline-Ansicht
     this._setTimelineSelected(true);
     const rect = target.getBoundingClientRect();
@@ -3498,7 +3502,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         <video class="player" playsinline muted controls></video>
         <div class="player-top-buttons">
           ${showLiveButton ? html`
-            <button class="overlay-btn" @click=${() => { this._closeClip(); this._openLive(); }} title="${t.live}">
+            <button class="overlay-btn" @click=${() => { this._disposeActiveClip(); this._openLive(); }} title="${t.live}">
               <ha-icon icon="mdi:cctv"></ha-icon>
             </button>
           ` : ""}
