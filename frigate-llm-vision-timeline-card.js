@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.34.0";
+const CARD_VERSION = "0.35.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1191,6 +1191,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _isSplitLayout() {
+    // Timeline view always uses split (vertical timeline) — horizontal axis is
+    // too cramped for hour-based marker reading.
+    if (this._config?.view_mode === "timeline") return true;
     const lay = this._config?.multiview
       ? (this._config.multiview_layout || "auto")
       : (this._config?.layout ?? "auto");
@@ -3116,6 +3119,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
       `;
     }
+    const visibleCap = 3;
+    const total = cluster.events.length;
+    const hidden = Math.max(0, total - visibleCap);
     return html`
       <div
         class="timeline-cluster"
@@ -3129,7 +3135,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
             ${this._renderTimelineMarkerCard(ev, lang)}
           </div>
         `)}
-        <div class="timeline-cluster-badge" aria-hidden="true">+${cluster.events.length - 1}</div>
+        ${hidden > 0
+          ? html`<div class="timeline-cluster-badge" aria-hidden="true">+${hidden}</div>`
+          : ""}
       </div>
     `;
   }
@@ -4728,16 +4736,15 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         z-index: 6;
       }
 
-      /* Cluster: stacked cards (default) → fan out on hover/focus/expand */
+      /* Cluster: stacked peek (collapsed) → vertical popover (expanded) */
       .timeline-cluster {
         --stack-collapsed-offset: 5px;
-        --stack-expanded-gap: 8px;
         --marker-color: var(--accent);
       }
       .timeline-cluster:hover,
       .timeline-cluster:focus-within,
       .timeline-cluster.expanded {
-        z-index: 8;
+        z-index: 100;
       }
       .timeline-cluster-item {
         position: absolute;
@@ -4748,21 +4755,82 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         transform:
           translateY(calc(var(--stack-index) * var(--stack-collapsed-offset)))
           scale(calc(1 - var(--stack-index) * 0.04));
-        opacity: calc(1 - clamp(0, var(--stack-index) * 0.18, 0.7));
+        opacity: calc(1 - clamp(0, var(--stack-index) * 0.22, 0.7));
         transition:
           transform 220ms cubic-bezier(.2,.7,.2,1),
           opacity 200ms ease;
       }
-      .timeline-cluster-item:first-child { position: relative; }
-      /* Hide stack tilt for items beyond first when not expanded */
-      .timeline-cluster-item:not(:first-child) { pointer-events: none; }
+      .timeline-cluster-item:first-child {
+        position: relative;
+      }
+      /* Cap: hide everything past the 3rd peek-marker when collapsed */
+      .timeline-cluster:not(:hover):not(:focus-within):not(.expanded)
+        .timeline-cluster-item:nth-child(n+4) {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      /* Only the top of the stack is clickable when collapsed */
+      .timeline-cluster-item:not(:first-child) {
+        pointer-events: none;
+      }
+
+      /* Expanded → popover that fills the lane height with a scrollable list */
+      .timeline-marker-lane.timeline-vertical .timeline-cluster:hover,
+      .timeline-marker-lane.timeline-vertical .timeline-cluster:focus-within,
+      .timeline-marker-lane.timeline-vertical .timeline-cluster.expanded {
+        top: 8px;
+        bottom: 8px;
+        transform: none;
+        background: var(--ha-card-background, var(--card-background-color, rgba(0, 0, 0, 0.92)));
+        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+        border-radius: 10px;
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      }
+      /* Same for horizontal lane (used outside timeline mode) */
+      .timeline-marker-lane.timeline-horizontal .timeline-cluster:hover,
+      .timeline-marker-lane.timeline-horizontal .timeline-cluster:focus-within,
+      .timeline-marker-lane.timeline-horizontal .timeline-cluster.expanded {
+        top: 6px;
+        bottom: 6px;
+        transform: translateX(-50%);
+        background: var(--ha-card-background, var(--card-background-color, rgba(0, 0, 0, 0.92)));
+        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
+        border-radius: 10px;
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+      }
       .timeline-cluster:hover .timeline-cluster-item,
       .timeline-cluster:focus-within .timeline-cluster-item,
       .timeline-cluster.expanded .timeline-cluster-item {
-        transform: translateY(calc(var(--stack-index) * (var(--marker-card-height, 76px) + var(--stack-expanded-gap))));
+        position: relative;
+        top: auto;
+        left: auto;
+        width: 100%;
+        transform: none;
         opacity: 1;
+        visibility: visible;
         pointer-events: auto;
+        flex-shrink: 0;
       }
+      /* Hide the connection line + badge when expanded */
+      .timeline-cluster:hover::before,
+      .timeline-cluster:focus-within::before,
+      .timeline-cluster.expanded::before {
+        display: none;
+      }
+
       .timeline-cluster-badge {
         position: absolute;
         top: -7px;
