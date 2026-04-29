@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.39.0";
+const CARD_VERSION = "0.40.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -2253,8 +2253,12 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const ratio = isVertical
       ? (e.clientY - rect.top) / rect.height
       : (e.clientX - rect.left) / rect.width;
+    const clamped = Math.max(0, Math.min(1, ratio));
     const visible = this._timelineVisibleRange();
-    const anchorMs = visible.start + Math.max(0, Math.min(1, ratio)) * (visible.end - visible.start);
+    // Newest at top → ratio 0 = end, ratio 1 = start
+    const anchorMs = isVertical
+      ? visible.end - clamped * (visible.end - visible.start)
+      : visible.start + clamped * (visible.end - visible.start);
     this._zoomTimelineStep(e.deltaY < 0 ? 1 : -1, anchorMs);
   }
 
@@ -2328,7 +2332,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       if (trackSize) {
         const ratioInTrack = Math.max(0, Math.min(1, (mid - trackOrigin) / trackSize));
         const visible = this._timelineVisibleRange();
-        const anchorMs = visible.start + ratioInTrack * (visible.end - visible.start);
+        // Newest at top → ratio 0 = end, ratio 1 = start
+        const anchorMs = info.isVertical
+          ? visible.end - ratioInTrack * (visible.end - visible.start)
+          : visible.start + ratioInTrack * (visible.end - visible.start);
         // Pull center towards finger midpoint
         const halfSpan = (this._timelineRangeEnd - this._timelineRangeStart) / (this._timelineZoomLevel || 1) / 2;
         const minC = this._timelineRangeStart + halfSpan;
@@ -2357,7 +2364,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const halfSpan = info.visibleSpan / 2;
     const minCenter = this._timelineRangeStart + halfSpan;
     const maxCenter = this._timelineRangeEnd - halfSpan;
-    let newCenter = info.initialCenter - deltaMs;
+    // Vertical axis renders newest at top: drag down should reveal newer
+    // content (move centre toward `end`), so we add deltaMs there.
+    let newCenter = info.isVertical
+      ? info.initialCenter + deltaMs
+      : info.initialCenter - deltaMs;
     if (minCenter <= maxCenter) {
       newCenter = Math.max(minCenter, Math.min(maxCenter, newCenter));
     }
@@ -2745,7 +2756,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       : (e.clientX - rect.left) / rect.width;
     const clamped = Math.max(0, Math.min(1, ratio));
     const visible = this._timelineVisibleRange();
-    const ts = visible.start + clamped * (visible.end - visible.start);
+    // Newest at top → ratio 0 = end, ratio 1 = start
+    const ts = isVertical
+      ? visible.end - clamped * (visible.end - visible.start)
+      : visible.start + clamped * (visible.end - visible.start);
     this._seekTimelineTo(ts);
   }
 
@@ -3039,42 +3053,17 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
       `;
     }
-    const wallClock = this._timelineHourStart ? this._formatWallClock() : null;
     return html`
       <div class="player-wrap timeline-player-wrap">
         ${this._timelineLoading ? html`<div class="loading">${t.timeline_loading}</div>` : ""}
         ${this._timelineError ? html`<div class="error">${this._timelineError}</div>` : ""}
         <video class="timeline-player" playsinline controls preload="metadata"></video>
-        ${wallClock ? html`
-          <div class="timeline-cam-badge">
-            <ha-icon icon="mdi:clock-outline"></ha-icon>
-            <span class="timeline-wallclock">${wallClock}</span>
-          </div>
-        ` : ""}
         <div class="player-top-buttons">
           <button class="overlay-btn" @click=${() => this._closeTimelineSelection()} title="${t.close}">
             <ha-icon icon="mdi:close"></ha-icon>
           </button>
         </div>
       </div>
-      ${this._timelineManifestPath || this._timelineCurrentSegment
-        ? html`
-            <div class="timeline-debug">
-              ${this._timelineManifestPath
-                ? html`<div class="timeline-debug-row">
-                    <span class="timeline-debug-key">Manifest:</span>
-                    <span class="timeline-debug-val" title=${this._timelineManifestPath}>${this._timelineManifestPath}</span>
-                  </div>`
-                : ""}
-              ${this._timelineCurrentSegment
-                ? html`<div class="timeline-debug-row">
-                    <span class="timeline-debug-key">Segment:</span>
-                    <span class="timeline-debug-val">${this._timelineCurrentSegment}</span>
-                  </div>`
-                : ""}
-            </div>
-          `
-        : ""}
     `;
   }
 
@@ -3104,49 +3093,13 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       const cappedSec = Math.min(this._timelinePlayerTime || 0, 3600);
       const absTimeMs = this._timelineHourStart + cappedSec * 1000;
       if (absTimeMs >= start && absTimeMs <= end) {
-        indicatorPos = ((absTimeMs - start) / span) * 100;
+        // Newest at top → invert position
+        indicatorPos = (1 - (absTimeMs - start) / span) * 100;
       }
     }
 
-    const levels = this._timelineZoomLevels();
-    const zoomIdx = levels.indexOf(this._timelineZoomLevel || 1);
-    const canZoomIn = zoomIdx < levels.length - 1;
-    const canZoomOut = zoomIdx > 0;
-
     return html`
       <div class="timeline-wrap timeline-${orientation}">
-        <div class="timeline-header">
-          <span class="timeline-cam">${cam ? this._camName(cam) : "—"}</span>
-          <span class="timeline-range">
-            ${formatTime(new Date(start), t)} → ${formatTime(new Date(end), t)}
-          </span>
-          <div class="timeline-zoom">
-            <button
-              class="timeline-zoom-btn"
-              title=${t.timeline_zoom_out}
-              ?disabled=${!canZoomOut}
-              @click=${() => this._zoomTimelineStep(-1)}
-            >
-              <ha-icon icon="mdi:magnify-minus-outline"></ha-icon>
-            </button>
-            <button
-              class="timeline-zoom-btn"
-              title=${t.timeline_zoom_reset}
-              ?disabled=${this._timelineZoomLevel === 1}
-              @click=${() => this._resetTimelineZoom()}
-            >
-              <ha-icon icon="mdi:magnify-remove-outline"></ha-icon>
-            </button>
-            <button
-              class="timeline-zoom-btn"
-              title=${t.timeline_zoom_in}
-              ?disabled=${!canZoomIn}
-              @click=${() => this._zoomTimelineStep(1)}
-            >
-              <ha-icon icon="mdi:magnify-plus-outline"></ha-icon>
-            </button>
-          </div>
-        </div>
         <div class="timeline-body timeline-${orientation}">
           <div
             class="timeline-track timeline-${orientation}"
@@ -3172,7 +3125,8 @@ class FrigateLlmVisionTimelineCard extends LitElement {
             <div class="timeline-event-marks">
               ${visibleEvents.map((ev) => {
                 const ts = ev._ts.getTime();
-                const pos = ((ts - start) / span) * 100;
+                // Newest at top → invert position
+                const pos = (1 - (ts - start) / span) * 100;
                 const rawLabel = ev._llm?.label || ev._label || "";
                 const color = labelColor(rawLabel, this._config?.label_colors);
                 const styleParts = [
@@ -3221,7 +3175,8 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const ticks = [];
     const startTick = Math.ceil(start / stepMs) * stepMs;
     for (let t = startTick; t <= end; t += stepMs) {
-      const pos = ((t - start) / span) * 100;
+      // Newest at top → invert position
+      const pos = (1 - (t - start) / span) * 100;
       const d = new Date(t);
       const pad = (n) => String(n).padStart(2, "0");
       const label = stepHours >= 24
@@ -4715,6 +4670,14 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         flex: 0 0 96px;
         border-radius: 8px 0 0 8px;
         overflow: visible;
+      }
+      /* Stacked layout (mobile): keep axis line, ticks and bars the same
+         visual size, just give the track itself less horizontal real estate
+         — labels still fit thanks to overflow: visible. */
+      .split.is-stacked > .right .timeline-track.timeline-vertical {
+        width: 56px;
+        min-width: 56px;
+        flex: 0 0 56px;
       }
 
       /* Event list to the right of the timeline axis (scrollable) */
