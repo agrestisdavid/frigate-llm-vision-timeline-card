@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.33.0";
+const CARD_VERSION = "0.33.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -3069,12 +3069,13 @@ class FrigateLlmVisionTimelineCard extends LitElement {
           ${snapUrl
             ? html`<img class="timeline-marker-img" src=${snapUrl} loading="lazy" @error=${(e) => { e.target.style.display = "none"; e.target.parentElement?.classList.add("placeholder"); }} />`
             : html`<div class="timeline-marker-img placeholder"></div>`}
-          ${icon ? html`<ha-icon class="timeline-marker-icon" icon=${icon}></ha-icon>` : ""}
         </div>
         <div class="timeline-marker-info">
-          ${labelText ? html`<div class="timeline-marker-label">${labelText}</div>` : ""}
+          <div class="timeline-marker-info-top">
+            ${labelText ? this._renderLabelChip(rawLabel, labelText) : html`<span></span>`}
+            <span class="timeline-marker-time">${timeText}</span>
+          </div>
           <div class="timeline-marker-title">${titleText}</div>
-          <div class="timeline-marker-time">${timeText}</div>
           ${description
             ? html`<div class="timeline-marker-desc">${this._shortDesc(description)}</div>`
             : ""}
@@ -4514,25 +4515,25 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         --marker-color: var(--accent);
         z-index: 2;
         display: flex;
-        gap: 8px;
+        gap: 10px;
         align-items: stretch;
-        padding: 4px;
-        background: color-mix(in srgb, var(--text-primary) 6%, #1a1a1a);
-        border: 1px solid var(--marker-color);
-        border-radius: 6px;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+        padding: 6px;
+        background: var(--ha-card-background, var(--card-background-color, #fff));
+        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
         cursor: pointer;
-        transition: transform 100ms ease, box-shadow 100ms ease;
+        transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
         overflow: hidden;
       }
       .timeline-marker-thumb {
         position: relative;
         flex: 0 0 auto;
-        width: 64px;
-        height: 64px;
+        width: 60px;
+        height: 60px;
         overflow: hidden;
-        border-radius: 4px;
-        background: #111;
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--text-primary) 8%, transparent);
       }
       .timeline-marker-img {
         width: 100%;
@@ -4542,51 +4543,64 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
       .timeline-marker-thumb.placeholder,
       .timeline-marker-img.placeholder {
-        background: linear-gradient(135deg, #333, #555);
+        background:
+          linear-gradient(135deg,
+            color-mix(in srgb, var(--text-primary) 12%, transparent),
+            color-mix(in srgb, var(--text-primary) 5%, transparent));
       }
       .timeline-marker-info {
         flex: 1 1 auto;
         min-width: 0;
         display: flex;
         flex-direction: column;
-        gap: 2px;
-        padding: 2px 4px 2px 0;
-        font-size: 0.78em;
-        line-height: 1.3;
-        color: var(--text-primary);
+        gap: 4px;
+        padding: 1px 0;
+        color: var(--primary-text-color, var(--text-primary));
       }
-      .timeline-marker-label {
+      .timeline-marker-info-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        min-height: 18px;
+      }
+      .timeline-marker-info-top .chip {
+        font-size: 0.68em;
+        padding: 2px 7px 2px 6px;
+      }
+      .timeline-marker-info-top .chip .chip-icon {
+        --mdc-icon-size: 12px;
+      }
+      .timeline-marker-time {
         font-size: 0.72em;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--marker-color);
-        font-weight: 700;
+        color: var(--secondary-text-color, var(--text-secondary));
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        flex-shrink: 0;
       }
       .timeline-marker-title {
+        font-size: 0.85em;
         font-weight: 600;
+        line-height: 1.2;
+        color: var(--primary-text-color, var(--text-primary));
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .timeline-marker-time {
-        font-size: 0.85em;
-        color: var(--text-secondary);
-        font-variant-numeric: tabular-nums;
-      }
       .timeline-marker-desc {
-        margin-top: 2px;
-        font-size: 0.8em;
-        color: var(--text-secondary);
+        font-size: 0.74em;
+        line-height: 1.3;
+        color: var(--secondary-text-color, var(--text-secondary));
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
       }
-      /* Connecting line from marker to its exact moment on the axis */
+      /* Connecting line from marker to its exact moment on the axis (subtle) */
       .timeline-marker::before {
         content: "";
         position: absolute;
-        background: var(--marker-color);
+        background: color-mix(in srgb, var(--marker-color) 70%, transparent);
         z-index: -1;
       }
       /* Markers live inside .timeline-marker-lane and are positioned by left/top % */
@@ -4604,8 +4618,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         transform: translateX(-50%);
       }
       .timeline-marker-lane.timeline-horizontal .timeline-marker:hover {
-        transform: translateX(-50%) scale(1.03);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+        transform: translateX(-50%) translateY(-1px);
+        border-color: var(--marker-color);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
         z-index: 4;
       }
       .timeline-marker-lane.timeline-vertical .timeline-marker {
@@ -4622,8 +4637,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         transform: translateY(-50%);
       }
       .timeline-marker-lane.timeline-vertical .timeline-marker:hover {
-        transform: translateY(-50%) scale(1.02);
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+        transform: translateY(-50%) translateX(2px);
+        border-color: var(--marker-color);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.16);
         z-index: 4;
       }
 
@@ -4652,17 +4668,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         text-overflow: ellipsis;
         white-space: nowrap;
         word-break: break-all;
-      }
-      .timeline-marker-icon {
-        position: absolute;
-        bottom: 2px;
-        right: 2px;
-        --mdc-icon-size: 14px;
-        background: var(--marker-color);
-        color: #fff;
-        border-radius: 50%;
-        padding: 2px;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
       }
       .timeline-empty {
         padding: 12px;
