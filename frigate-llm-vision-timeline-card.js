@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.8";
+const CARD_VERSION = "0.42.9";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -4254,6 +4254,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         gap: 12px;
         padding: 10px 12px;
         margin: 4px 8px;
+        min-width: 0;
         border-radius: 10px;
         background: color-mix(in srgb, var(--text-primary) 4%, transparent);
         cursor: default;
@@ -4277,12 +4278,14 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         align-items: center;
         gap: 8px;
         margin-bottom: 2px;
+        min-width: 0;
+        flex-wrap: wrap;
       }
       .row-title {
         font-weight: 500;
         color: var(--text-primary);
-        overflow: hidden;
-        text-overflow: ellipsis;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
       .chip {
         --chip-color: var(--accent);
@@ -4333,6 +4336,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         font-size: 0.88em;
         color: var(--text-primary);
         line-height: 1.3;
+        overflow-wrap: anywhere;
       }
       .desc.placeholder {
         color: var(--text-secondary);
@@ -4809,14 +4813,15 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         border-radius: 8px 0 0 8px;
         overflow: visible;
       }
-      /* Stacked layout (mobile): same axis line, ticks, bars and label
-         size as split — only the track footprint shrinks. 80px is the
-         narrowest we can go before "HH:00" labels (1em) start spilling
-         past the track on the left side. */
+      /* Stacked layout (mobile): track halved vs. split. To make 40px
+         work we also shrink the "HH:00" labels (rule below). */
       .split.is-stacked > .right .timeline-track.timeline-vertical {
-        width: 80px;
-        min-width: 80px;
-        flex: 0 0 80px;
+        width: 40px;
+        min-width: 40px;
+        flex: 0 0 40px;
+      }
+      .split.is-stacked > .right .timeline-vertical .timeline-tick-label {
+        font-size: 0.78em;
       }
 
       /* Flipped layout: events list on the left, axis on the right */
