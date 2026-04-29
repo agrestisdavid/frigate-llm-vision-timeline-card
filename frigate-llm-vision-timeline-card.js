@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.0";
+const CARD_VERSION = "0.42.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1619,8 +1619,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   async _fetchFrigateApiEvents() {
-    const base = this._config?.frigate_url;
-    if (!base) return [];
+    if (!this.hass) return [];
     try {
       const targetCams = this._getTargetCameras();
       const params = new URLSearchParams();
@@ -1631,15 +1630,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       if (Array.isArray(targetCams) && targetCams.length) {
         params.set("cameras", targetCams.join(","));
       }
-      const url = `${base.replace(/\/+$/, "")}/api/events?${params.toString()}`;
-      const resp = await fetch(url, { method: "GET" });
-      if (!resp.ok) {
-        console.warn(
-          `[FrigateLLMCard] Frigate /api/events HTTP ${resp.status} (ignored)`
-        );
-        return [];
-      }
-      const data = await resp.json();
+      const clientId = this._config?.frigate_client_id;
+      const path = clientId
+        ? `frigate/${clientId}/events?${params.toString()}`
+        : `frigate/events?${params.toString()}`;
+      const data = await this.hass.callApi("GET", path);
       const items = Array.isArray(data) ? data : [];
       return items.map((e) => ({
         id: e.id || "",
