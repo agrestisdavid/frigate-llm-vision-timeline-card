@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.43.0";
+const CARD_VERSION = "0.43.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -3564,6 +3564,25 @@ class FrigateLlmVisionTimelineCard extends LitElement {
             ? this._renderTimelineDayFilter(t, lang)
             : this._renderEventsDateFilter(t, dateLabels)}
         </div>
+
+        ${this._config?.view_mode === "timeline"
+          ? html`
+              <button
+                class="iconbtn"
+                title="${t.timeline_zoom_out}"
+                @click=${() => this._zoomTimelineStep(-1)}
+              >
+                <ha-icon icon="mdi:magnify-minus-outline"></ha-icon>
+              </button>
+              <button
+                class="iconbtn"
+                title="${t.timeline_zoom_in}"
+                @click=${() => this._zoomTimelineStep(1)}
+              >
+                <ha-icon icon="mdi:magnify-plus-outline"></ha-icon>
+              </button>
+            `
+          : ""}
       </div>
     `;
   }
