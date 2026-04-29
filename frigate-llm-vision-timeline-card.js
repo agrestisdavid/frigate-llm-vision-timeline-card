@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.38.1";
+const CARD_VERSION = "0.39.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -3193,10 +3193,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
                 </div>`
               : ""}
           </div>
-          <div class="timeline-marker-lane timeline-${orientation}">
-            ${this._clusterTimelineEvents(visibleEvents, start, span).map(
-              (cluster) => this._renderTimelineCluster(cluster, isSplit, lang)
-            )}
+          <div class="timeline-event-list">
+            ${visibleEvents.length === 0
+              ? html`<div class="timeline-empty">${t.no_events}</div>`
+              : visibleEvents.map((ev) => this._renderTimelineMarkerCard(ev, lang))}
           </div>
         </div>
         ${events.length === 0 && !this._timelineError
@@ -3232,30 +3232,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       ticks.push({ pos, label });
     }
     return ticks;
-  }
-
-  _clusterTimelineEvents(events, start, span) {
-    if (!events?.length) return [];
-    const positioned = events
-      .map((ev) => ({
-        ev,
-        pos: ((ev._ts.getTime() - start) / span) * 100,
-      }))
-      .sort((a, b) => a.pos - b.pos);
-    // Two events whose positions fall within this many % of the visible range
-    // are clustered. ~5% is ≈72min at 24h zoom, ≈3min at 1h zoom.
-    const threshold = 5;
-    const clusters = [];
-    let current = null;
-    for (const item of positioned) {
-      if (current && (item.pos - current.events[current.events.length - 1].pos) < threshold) {
-        current.events.push(item);
-      } else {
-        current = { events: [item], anchorPos: item.pos };
-        clusters.push(current);
-      }
-    }
-    return clusters;
   }
 
   _formatWallClock() {
@@ -3313,65 +3289,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
       </div>
     `;
-  }
-
-  _renderTimelineCluster(cluster, isSplit, lang) {
-    const wrapperStyle = isSplit
-      ? `top: ${cluster.anchorPos}%;`
-      : `left: ${cluster.anchorPos}%;`;
-    if (cluster.events.length === 1) {
-      return html`
-        <div class="timeline-marker-pos" style=${wrapperStyle}>
-          ${this._renderTimelineMarkerCard(cluster.events[0].ev, lang)}
-        </div>
-      `;
-    }
-    const visibleCap = 3;
-    const total = cluster.events.length;
-    const hidden = Math.max(0, total - visibleCap);
-    return html`
-      <div
-        class="timeline-cluster"
-        style=${wrapperStyle}
-        tabindex="0"
-        @pointerdown=${(e) => e.stopPropagation()}
-        @click=${(e) => this._onClusterClick(e)}
-      >
-        ${cluster.events.map(({ ev }, i) => html`
-          <div class="timeline-cluster-item" style=${`--stack-index: ${i};`}>
-            ${this._renderTimelineMarkerCard(ev, lang)}
-          </div>
-        `)}
-        ${hidden > 0
-          ? html`<div class="timeline-cluster-badge" aria-hidden="true">+${hidden}</div>`
-          : ""}
-      </div>
-    `;
-  }
-
-  _onClusterClick(e) {
-    // Tap on a collapsed cluster expands it without opening any clip; once
-    // expanded, the inner markers handle their own clicks normally.
-    const cluster = e.currentTarget;
-    const target = e.target.closest(".timeline-cluster-item");
-    const wasExpanded = cluster.classList.contains("expanded");
-    if (!wasExpanded) {
-      cluster.classList.add("expanded");
-      e.stopPropagation();
-      e.preventDefault();
-      const collapse = (ev2) => {
-        if (cluster.contains(ev2.target)) return;
-        cluster.classList.remove("expanded");
-        document.removeEventListener("pointerdown", collapse, true);
-      };
-      document.addEventListener("pointerdown", collapse, true);
-      return;
-    }
-    // Already expanded — let the marker click bubble up if user tapped one.
-    if (!target) {
-      cluster.classList.remove("expanded");
-      e.stopPropagation();
-    }
   }
 
   _renderEventList(filtered) {
@@ -4800,22 +4717,35 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         overflow: visible;
       }
 
-      /* Marker lane: visual only, marker clicks open clip */
-      .timeline-marker-lane {
-        position: relative;
+      /* Event list to the right of the timeline axis (scrollable) */
+      .timeline-event-list {
         flex: 1 1 auto;
         min-width: 0;
         min-height: 0;
-        overflow: visible;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 4px 6px 4px 8px;
         background: color-mix(in srgb, var(--text-primary) 3%, transparent);
-      }
-      .timeline-marker-lane.timeline-horizontal {
-        border-radius: 0 0 8px 8px;
-        height: 96px;
-        flex: 0 0 96px;
-      }
-      .timeline-marker-lane.timeline-vertical {
         border-radius: 0 8px 8px 0;
+      }
+      .timeline-event-list > .row {
+        margin: 0;
+        background: var(--ha-card-background, var(--card-background-color, #fff));
+        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+        flex-shrink: 0;
+      }
+      .timeline-event-list > .row:hover {
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--divider-color));
+      }
+      .timeline-event-list .timeline-empty {
+        padding: 24px 12px;
+        text-align: center;
+        color: var(--text-secondary);
+        font-size: 0.85em;
       }
 
       .timeline-axis {
@@ -5045,182 +4975,18 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       .timeline-marker-desc {
         opacity: 0.95;
       }
-      /* Connecting line from marker to its exact moment on the axis (subtle) */
-      /* Position wrapper for both single markers and clusters */
-      .timeline-marker-pos,
-      .timeline-cluster {
-        position: absolute;
-        z-index: 2;
-      }
-      .timeline-marker-lane.timeline-horizontal .timeline-marker-pos,
-      .timeline-marker-lane.timeline-horizontal .timeline-cluster {
-        top: 14px;
-        transform: translateX(-50%);
-        width: calc(100% - 24px);
-        max-width: min(280px, calc(100% - 24px));
-      }
-      .timeline-marker-lane.timeline-vertical .timeline-marker-pos,
-      .timeline-marker-lane.timeline-vertical .timeline-cluster {
-        left: 14px;
-        transform: translateY(-50%);
-        width: calc(100% - 22px);
-      }
-      /* No connection line — event marks on the axis already establish the
-         visual link between card position and timeline moment. */
-
-      /* Row-style cards inside the timeline lane (look like the events list) */
-      .timeline-marker-pos > .row,
-      .timeline-cluster-item > .row {
-        margin: 0;
-        width: 100%;
-        background: var(--ha-card-background, var(--card-background-color, #fff));
-        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-        box-sizing: border-box;
-      }
-      .timeline-marker-pos > .row:hover,
-      .timeline-cluster-item > .row:hover {
-        border-color: color-mix(in srgb, var(--accent) 50%, var(--divider-color));
-      }
-      /* Smaller snap thumbnail in lane to fit narrower lanes */
-      .timeline-marker-lane .row .snap {
+      /* Slimmer snapshot in the timeline list to fit narrower split panes */
+      .timeline-event-list .row .snap {
         flex: 0 0 84px;
         width: 84px;
         height: 64px;
       }
-      .timeline-marker-lane .row .desc {
+      .timeline-event-list .row .desc {
         font-size: 0.82em;
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
-      }
-      /* Single-marker hover lift */
-      .timeline-marker-lane.timeline-horizontal .timeline-marker-pos:hover {
-        z-index: 6;
-      }
-      .timeline-marker-lane.timeline-vertical .timeline-marker-pos:hover {
-        z-index: 6;
-      }
-
-      /* Cluster: stacked peek (collapsed) → vertical popover (expanded) */
-      .timeline-cluster {
-        --stack-collapsed-offset: 5px;
-        --marker-color: var(--accent);
-      }
-      .timeline-cluster:hover,
-      .timeline-cluster:focus-within,
-      .timeline-cluster.expanded {
-        z-index: 100;
-      }
-      .timeline-cluster-item {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        z-index: calc(50 - var(--stack-index));
-        transform:
-          translateY(calc(var(--stack-index) * var(--stack-collapsed-offset)))
-          scale(calc(1 - var(--stack-index) * 0.04));
-        opacity: calc(1 - clamp(0, var(--stack-index) * 0.22, 0.7));
-        transition:
-          transform 220ms cubic-bezier(.2,.7,.2,1),
-          opacity 200ms ease;
-      }
-      .timeline-cluster-item:first-child {
-        position: relative;
-      }
-      /* Cap: hide everything past the 3rd peek-marker when collapsed */
-      .timeline-cluster:not(:hover):not(:focus-within):not(.expanded)
-        .timeline-cluster-item:nth-child(n+4) {
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-      }
-      /* Only the top of the stack is clickable when collapsed */
-      .timeline-cluster-item:not(:first-child) {
-        pointer-events: none;
-      }
-
-      /* Expanded → popover that fills the lane height with a scrollable list */
-      .timeline-marker-lane.timeline-vertical .timeline-cluster:hover,
-      .timeline-marker-lane.timeline-vertical .timeline-cluster:focus-within,
-      .timeline-marker-lane.timeline-vertical .timeline-cluster.expanded {
-        top: 8px;
-        bottom: 8px;
-        transform: none;
-        background: var(--ha-card-background, var(--card-background-color, rgba(0, 0, 0, 0.92)));
-        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
-        border-radius: 10px;
-        padding: 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        overflow-y: auto;
-        overflow-x: hidden;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-      }
-      /* Same for horizontal lane (used outside timeline mode) */
-      .timeline-marker-lane.timeline-horizontal .timeline-cluster:hover,
-      .timeline-marker-lane.timeline-horizontal .timeline-cluster:focus-within,
-      .timeline-marker-lane.timeline-horizontal .timeline-cluster.expanded {
-        top: 6px;
-        bottom: 6px;
-        transform: translateX(-50%);
-        background: var(--ha-card-background, var(--card-background-color, rgba(0, 0, 0, 0.92)));
-        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.25));
-        border-radius: 10px;
-        padding: 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        overflow-y: auto;
-        overflow-x: hidden;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-      }
-      .timeline-cluster:hover .timeline-cluster-item,
-      .timeline-cluster:focus-within .timeline-cluster-item,
-      .timeline-cluster.expanded .timeline-cluster-item {
-        position: relative;
-        top: auto;
-        left: auto;
-        width: 100%;
-        transform: none;
-        opacity: 1;
-        visibility: visible;
-        pointer-events: auto;
-        flex-shrink: 0;
-      }
-      /* Hide the connection line + badge when expanded */
-      .timeline-cluster:hover::before,
-      .timeline-cluster:focus-within::before,
-      .timeline-cluster.expanded::before {
-        display: none;
-      }
-
-      .timeline-cluster-badge {
-        position: absolute;
-        top: -7px;
-        right: -7px;
-        min-width: 22px;
-        height: 22px;
-        padding: 0 7px;
-        border-radius: 999px;
-        background: var(--marker-color, var(--accent));
-        color: var(--text-primary-color, #fff);
-        font-size: 0.72em;
-        font-weight: 700;
-        line-height: 22px;
-        text-align: center;
-        z-index: 100;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-        pointer-events: none;
-        transition: opacity 150ms ease;
-      }
-      .timeline-cluster:hover .timeline-cluster-badge,
-      .timeline-cluster:focus-within .timeline-cluster-badge,
-      .timeline-cluster.expanded .timeline-cluster-badge {
-        opacity: 0;
       }
 
       .timeline-debug {
