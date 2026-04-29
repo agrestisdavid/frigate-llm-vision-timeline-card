@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.4";
+const CARD_VERSION = "0.42.5";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1621,10 +1621,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   async _fetchFrigateApiEvents() {
     if (!this.hass) return [];
     try {
-      const camCfg = this._config?.cameras || {};
-      const frigateCamNames = Object.values(camCfg)
-        .map((c) => c?.main)
-        .filter(Boolean);
       const after = Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000);
       const msg = {
         type: "frigate/events/get",
@@ -1633,9 +1629,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         has_clip: true,
         after,
       };
-      if (frigateCamNames.length) {
-        msg.cameras = frigateCamNames;
-      }
       console.info("[FrigateLLMCard] Frigate events WS query:", msg);
       const raw = await this.hass.callWS(msg);
       const items =
