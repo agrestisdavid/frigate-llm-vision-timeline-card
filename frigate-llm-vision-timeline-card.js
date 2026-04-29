@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.3";
+const CARD_VERSION = "0.42.4";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1636,6 +1636,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       if (frigateCamNames.length) {
         msg.cameras = frigateCamNames;
       }
+      console.info("[FrigateLLMCard] Frigate events WS query:", msg);
       const raw = await this.hass.callWS(msg);
       const items =
         typeof raw === "string"
@@ -1643,13 +1644,23 @@ class FrigateLlmVisionTimelineCard extends LitElement {
           : Array.isArray(raw)
           ? raw
           : [];
-      return items.map((e) => ({
+      console.info(
+        `[FrigateLLMCard] Frigate events WS returned ${items.length} items`,
+        items[0] ? { sample: items[0] } : ""
+      );
+      const mapped = items.map((e) => ({
         id: e.id || "",
         camera: e.camera || "",
         label: e.label || "",
         subLabel: e.sub_label || "",
         description: (e?.data?.description || "").trim(),
       }));
+      const withSub = mapped.filter((m) => m.subLabel).length;
+      const withDesc = mapped.filter((m) => m.description).length;
+      console.info(
+        `[FrigateLLMCard] Frigate enriched: ${mapped.length} events, ${withSub} with sub_label, ${withDesc} with description`
+      );
+      return mapped;
     } catch (e) {
       console.warn("[FrigateLLMCard] Frigate events WS fetch failed (ignored):", e);
       return [];
@@ -1680,10 +1691,22 @@ class FrigateLlmVisionTimelineCard extends LitElement {
 
   _enrichEvents(frigateEvents) {
     if (this._frigateApiById?.size) {
+      let matched = 0;
       for (const ev of frigateEvents) {
         const f = this._frigateApiById.get(ev._eventId);
-        if (f) ev._frigate = f;
+        if (f) {
+          ev._frigate = f;
+          matched++;
+        }
       }
+      const sampleIds = frigateEvents.slice(0, 3).map((e) => e._eventId);
+      const apiIds = Array.from(this._frigateApiById.keys()).slice(0, 3);
+      console.info(
+        `[FrigateLLMCard] Enrich: ${matched}/${frigateEvents.length} timeline events matched Frigate API by id`,
+        { timelineSampleIds: sampleIds, apiSampleIds: apiIds }
+      );
+    } else {
+      console.info("[FrigateLLMCard] Enrich: no Frigate API events to merge");
     }
     if (this._llmEvents?.length) {
       const TOL = 90 * 1000;
