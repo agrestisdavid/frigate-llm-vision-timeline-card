@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.38.0";
+const CARD_VERSION = "0.38.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -2078,6 +2078,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       return;
     }
     this._disposeActiveClip();
+    this._focusCamera(cam);
     this._liveMode = true;
     this._liveCamera = cam;
     this._liveError = null;
@@ -2115,12 +2116,35 @@ class FrigateLlmVisionTimelineCard extends LitElement {
 
   _switchLiveCamera(cameraName) {
     if (cameraName === this._liveCamera) return;
+    this._focusCamera(cameraName);
     this._liveCamera = cameraName;
     this._isHD = false;
     this._liveLoading = true;
     this._liveError = null;
     this._liveProvider = null;
     this._ensureLivestreamController().switchCamera(cameraName);
+  }
+
+  /**
+   * Focus the card on a single camera: syncs the camera filter so the events
+   * list, the timeline marker stream and the timeline VoD playback all show
+   * the same camera as the live picker selection.
+   */
+  _focusCamera(cameraName) {
+    if (!cameraName) return;
+    this._activeCameras = new Set([cameraName]);
+    // If the timeline already has a different camera loaded, force a reload
+    if (
+      this._config?.view_mode === "timeline" &&
+      this._timelineCamera &&
+      this._timelineCamera !== cameraName
+    ) {
+      this._cleanupTimeline();
+      this._timelineCamera = null;
+      this._timelineHourStart = 0;
+      this._timelinePendingSeekSec = null;
+      this._timelinePlayerTime = 0;
+    }
   }
 
   _cleanupLivestream() {
