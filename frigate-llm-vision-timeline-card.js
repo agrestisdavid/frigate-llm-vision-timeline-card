@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.1";
+const CARD_VERSION = "0.42.2";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1622,20 +1622,24 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     if (!this.hass) return [];
     try {
       const targetCams = this._getTargetCameras();
-      const params = new URLSearchParams();
-      params.set("limit", "200");
-      params.set("has_clip", "1");
       const after = Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000);
-      params.set("after", String(after));
+      const msg = {
+        type: "frigate/events/get",
+        instance_id: this._config?.frigate_client_id || "frigate",
+        limit: 200,
+        has_clip: true,
+        after,
+      };
       if (Array.isArray(targetCams) && targetCams.length) {
-        params.set("cameras", targetCams.join(","));
+        msg.cameras = targetCams;
       }
-      const clientId = this._config?.frigate_client_id;
-      const path = clientId
-        ? `frigate/${clientId}/events?${params.toString()}`
-        : `frigate/events?${params.toString()}`;
-      const data = await this.hass.callApi("GET", path);
-      const items = Array.isArray(data) ? data : [];
+      const raw = await this.hass.callWS(msg);
+      const items =
+        typeof raw === "string"
+          ? JSON.parse(raw)
+          : Array.isArray(raw)
+          ? raw
+          : [];
       return items.map((e) => ({
         id: e.id || "",
         camera: e.camera || "",
@@ -1644,7 +1648,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         description: (e?.data?.description || "").trim(),
       }));
     } catch (e) {
-      console.warn("[FrigateLLMCard] Frigate /api/events fetch failed (ignored):", e);
+      console.warn("[FrigateLLMCard] Frigate events WS fetch failed (ignored):", e);
       return [];
     }
   }
