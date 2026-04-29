@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.37.1";
+const CARD_VERSION = "0.38.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1018,6 +1018,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       _timelineCurrentSegment: { state: true },
       _timelineManifestPath: { state: true },
       _timelineSelected: { state: true },
+      _timelineSelectedDay: { state: true },
     };
   }
 
@@ -1070,6 +1071,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     this._timelineCurrentSegment = null;
     this._timelineManifestPath = null;
     this._timelineSelected = false;
+    this._timelineSelectedDay = null;  // ms at 00:00 of chosen day; null = rolling window
   }
 
   connectedCallback() {
@@ -1093,7 +1095,28 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     window.addEventListener("hashchange", this._onHashChange);
     this._onLocationChanged = () => this._checkHashForClip();
     window.addEventListener("location-changed", this._onLocationChanged);
+    this._onOutsideClick = (e) => this._handleOutsideClick(e);
+    document.addEventListener("pointerdown", this._onOutsideClick, true);
     this._setupAutoRefresh();
+  }
+
+  _handleOutsideClick(e) {
+    if (
+      !this._showLabelMenu &&
+      !this._showDateMenu &&
+      !this._showCameraMenu &&
+      !this._showLiveCamMenu
+    ) return;
+    const path = e.composedPath();
+    const inFilter = path.some(
+      (el) => el.classList && el.classList.contains("filter-dropdown")
+    );
+    if (!inFilter) {
+      this._showLabelMenu = false;
+      this._showDateMenu = false;
+      this._showCameraMenu = false;
+      this._showLiveCamMenu = false;
+    }
   }
 
   _setupAutoRefresh() {
@@ -1158,6 +1181,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     if (this._onLocationChanged) {
       window.removeEventListener("location-changed", this._onLocationChanged);
       this._onLocationChanged = null;
+    }
+    if (this._onOutsideClick) {
+      document.removeEventListener("pointerdown", this._onOutsideClick, true);
+      this._onOutsideClick = null;
     }
     this._clearAutoRefresh();
     this._cleanupTimeline();
@@ -2115,12 +2142,45 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _computeTimelineRange() {
+    if (this._timelineSelectedDay != null) {
+      const start = this._timelineSelectedDay;
+      const end = start + 24 * 3600 * 1000;
+      this._timelineRangeStart = start;
+      this._timelineRangeEnd = end;
+      if (
+        !this._timelineZoomCenter ||
+        this._timelineZoomCenter < start ||
+        this._timelineZoomCenter > end
+      ) {
+        // Anchor zoom near "now" if today is selected, else the day's noon
+        const now = Date.now();
+        this._timelineZoomCenter = now >= start && now <= end
+          ? now
+          : start + 12 * 3600 * 1000;
+      }
+      return { start, end };
+    }
     const end = Date.now();
     const start = end - this._timelineWindowMs();
     this._timelineRangeStart = start;
     this._timelineRangeEnd = end;
     if (!this._timelineZoomCenter) this._timelineZoomCenter = end;
     return { start, end };
+  }
+
+  _setTimelineSelectedDay(dayStartMs) {
+    if (this._timelineSelectedDay === dayStartMs) return;
+    this._timelineSelectedDay = dayStartMs;
+    // Reset zoom + reload VoD/markers for the new day
+    this._timelineZoomLevel = 1;
+    this._timelineZoomCenter = 0;
+    this._cleanupTimeline();
+    this._timelineHourStart = 0;
+    this._timelinePendingSeekSec = null;
+    this._timelinePlayerTime = 0;
+    if (this._timelineSelected) {
+      this.updateComplete.then(() => this._initTimeline());
+    }
   }
 
   _timelineZoomLevels() {
@@ -2178,6 +2238,25 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     if (e.button != null && e.button !== 0) return;
     const target = e.currentTarget;
     if (!target) return;
+    if (!this._timelinePinch) this._timelinePinch = new Map();
+    this._timelinePinch.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try { target.setPointerCapture(e.pointerId); } catch {}
+    if (this._timelinePinch.size === 2) {
+      // Switch to pinch-zoom; cancel any pan in progress
+      this._timelineDragInfo = null;
+      target.classList.remove("timeline-track--dragging");
+      const pts = Array.from(this._timelinePinch.values());
+      this._timelinePinchInfo = {
+        target,
+        rect: target.getBoundingClientRect(),
+        isVertical: target.classList.contains("timeline-vertical"),
+        startDistance: this._distance(pts[0], pts[1]),
+        startZoom: this._timelineZoomLevel,
+        startCenter: this._timelineZoomCenter || this._timelineRangeEnd,
+      };
+      return;
+    }
+    if (this._timelinePinch.size > 1) return; // ignore further fingers
     const visible = this._timelineVisibleRange();
     this._timelineDragInfo = {
       pointerId: e.pointerId,
@@ -2190,10 +2269,52 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       moved: false,
       target,
     };
-    try { target.setPointerCapture(e.pointerId); } catch {}
+  }
+
+  _distance(a, b) {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return Math.sqrt(dx * dx + dy * dy);
   }
 
   _onTimelinePointerMove(e) {
+    if (this._timelinePinch && this._timelinePinch.has(e.pointerId)) {
+      this._timelinePinch.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    if (this._timelinePinchInfo && this._timelinePinch?.size >= 2) {
+      const pts = Array.from(this._timelinePinch.values()).slice(0, 2);
+      const dist = this._distance(pts[0], pts[1]);
+      const ratio = dist / this._timelinePinchInfo.startDistance;
+      const levels = this._timelineZoomLevels();
+      const startIdx = levels.indexOf(this._timelinePinchInfo.startZoom);
+      // Pinch out (ratio>1) → zoom in (more steps); pinch in → zoom out
+      const stepDelta = Math.round(Math.log2(Math.max(0.1, ratio)) * 1.5);
+      const targetIdx = Math.max(0, Math.min(levels.length - 1, startIdx + stepDelta));
+      const targetZoom = levels[targetIdx];
+      if (targetZoom !== this._timelineZoomLevel) {
+        this._timelineZoomLevel = targetZoom;
+      }
+      // Anchor zoom around midpoint between fingers
+      const info = this._timelinePinchInfo;
+      const mid = info.isVertical
+        ? (pts[0].y + pts[1].y) / 2
+        : (pts[0].x + pts[1].x) / 2;
+      const trackSize = info.isVertical ? info.rect.height : info.rect.width;
+      const trackOrigin = info.isVertical ? info.rect.top : info.rect.left;
+      if (trackSize) {
+        const ratioInTrack = Math.max(0, Math.min(1, (mid - trackOrigin) / trackSize));
+        const visible = this._timelineVisibleRange();
+        const anchorMs = visible.start + ratioInTrack * (visible.end - visible.start);
+        // Pull center towards finger midpoint
+        const halfSpan = (this._timelineRangeEnd - this._timelineRangeStart) / (this._timelineZoomLevel || 1) / 2;
+        const minC = this._timelineRangeStart + halfSpan;
+        const maxC = this._timelineRangeEnd - halfSpan;
+        if (minC <= maxC) {
+          this._timelineZoomCenter = Math.max(minC, Math.min(maxC, anchorMs));
+        }
+      }
+      return;
+    }
     const info = this._timelineDragInfo;
     if (!info || e.pointerId !== info.pointerId) return;
     const deltaPx = info.isVertical
@@ -2220,6 +2341,14 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _onTimelinePointerUp(e) {
+    if (this._timelinePinch?.has(e.pointerId)) {
+      this._timelinePinch.delete(e.pointerId);
+      try { e.currentTarget?.releasePointerCapture(e.pointerId); } catch {}
+      if (this._timelinePinch.size < 2) this._timelinePinchInfo = null;
+      // If we just exited pinch and a finger remains, swallow this up so it
+      // doesn't immediately register as a tap-seek.
+      if (this._timelinePinch.size > 0) return;
+    }
     const info = this._timelineDragInfo;
     if (!info || e.pointerId !== info.pointerId) return;
     try { info.target.releasePointerCapture(e.pointerId); } catch {}
@@ -2231,6 +2360,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _onTimelinePointerCancel(e) {
+    if (this._timelinePinch?.has(e.pointerId)) {
+      this._timelinePinch.delete(e.pointerId);
+      try { e.currentTarget?.releasePointerCapture(e.pointerId); } catch {}
+      if (this._timelinePinch.size < 2) this._timelinePinchInfo = null;
+    }
     const info = this._timelineDragInfo;
     if (!info || e.pointerId !== info.pointerId) return;
     try { info.target.releasePointerCapture(e.pointerId); } catch {}
@@ -3393,37 +3527,104 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
 
         <div class="filter-dropdown">
-          <button
-            class="filter-btn ${this._dateFilter && this._dateFilter !== "all" ? "active" : ""}"
-            @click=${() => this._toggleDateMenu()}
-          >
-            <ha-icon icon="mdi:calendar-outline"></ha-icon>
-            <span>${dateLabels[this._dateFilter] || dateLabels.all}</span>
-            <ha-icon icon="mdi:chevron-down"></ha-icon>
-          </button>
-          ${this._showDateMenu
-            ? html`
-                <div class="filter-menu">
-                  ${["all", "today", "yesterday", "week"].map(
-                    (k) => html`
-                      <div
-                        class="filter-menu-item ${this._dateFilter === k ? "active" : ""}"
-                        @click=${() => this._setDateFilter(k)}
-                      >
-                        <ha-icon
-                          icon=${this._dateFilter === k
-                            ? "mdi:radiobox-marked"
-                            : "mdi:radiobox-blank"}
-                        ></ha-icon>
-                        <span>${dateLabels[k]}</span>
-                      </div>
-                    `
-                  )}
-                </div>
-              `
-            : ""}
+          ${this._config?.view_mode === "timeline"
+            ? this._renderTimelineDayFilter(t, lang)
+            : this._renderEventsDateFilter(t, dateLabels)}
         </div>
       </div>
+    `;
+  }
+
+  _renderEventsDateFilter(t, dateLabels) {
+    return html`
+      <button
+        class="filter-btn ${this._dateFilter && this._dateFilter !== "all" ? "active" : ""}"
+        @click=${() => this._toggleDateMenu()}
+      >
+        <ha-icon icon="mdi:calendar-outline"></ha-icon>
+        <span>${dateLabels[this._dateFilter] || dateLabels.all}</span>
+        <ha-icon icon="mdi:chevron-down"></ha-icon>
+      </button>
+      ${this._showDateMenu
+        ? html`
+            <div class="filter-menu">
+              ${["all", "today", "yesterday", "week"].map(
+                (k) => html`
+                  <div
+                    class="filter-menu-item ${this._dateFilter === k ? "active" : ""}"
+                    @click=${() => this._setDateFilter(k)}
+                  >
+                    <ha-icon
+                      icon=${this._dateFilter === k
+                        ? "mdi:radiobox-marked"
+                        : "mdi:radiobox-blank"}
+                    ></ha-icon>
+                    <span>${dateLabels[k]}</span>
+                  </div>
+                `
+              )}
+            </div>
+          `
+        : ""}
+    `;
+  }
+
+  _renderTimelineDayFilter(t, lang) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayMs = today.getTime();
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      days.push({
+        ms: d.getTime(),
+        date: d,
+      });
+    }
+    const pad = (n) => String(n).padStart(2, "0");
+    const labelFor = (item) => {
+      if (item.ms === todayMs) return t.filter_today;
+      if (item.ms === todayMs - 86400000) return t.filter_yesterday;
+      const weekday = item.date.toLocaleDateString(lang === "de" ? "de-DE" : "en-US", { weekday: "short" });
+      return `${weekday} ${pad(item.date.getDate())}.${pad(item.date.getMonth() + 1)}.`;
+    };
+    const selected = this._timelineSelectedDay;
+    const buttonLabel = selected != null
+      ? labelFor(days.find((d) => d.ms === selected) || { ms: selected, date: new Date(selected) })
+      : t.filter_today;
+    return html`
+      <button
+        class="filter-btn ${selected != null && selected !== todayMs ? "active" : ""}"
+        @click=${() => this._toggleDateMenu()}
+      >
+        <ha-icon icon="mdi:calendar-outline"></ha-icon>
+        <span>${buttonLabel}</span>
+        <ha-icon icon="mdi:chevron-down"></ha-icon>
+      </button>
+      ${this._showDateMenu
+        ? html`
+            <div class="filter-menu">
+              ${days.map((item) => {
+                const isActive = (selected ?? todayMs) === item.ms;
+                return html`
+                  <div
+                    class="filter-menu-item ${isActive ? "active" : ""}"
+                    @click=${() => {
+                      this._setTimelineSelectedDay(item.ms);
+                      this._showDateMenu = false;
+                    }}
+                  >
+                    <ha-icon
+                      icon=${isActive ? "mdi:radiobox-marked" : "mdi:radiobox-blank"}
+                    ></ha-icon>
+                    <span>${labelFor(item)}</span>
+                  </div>
+                `;
+              })}
+            </div>
+          `
+        : ""}
     `;
   }
 
@@ -4568,9 +4769,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         border-radius: 8px 8px 0 0;
       }
       .timeline-track.timeline-vertical {
-        width: 88px;
-        min-width: 88px;
-        flex: 0 0 88px;
+        width: 96px;
+        min-width: 96px;
+        flex: 0 0 96px;
         border-radius: 8px 0 0 8px;
         overflow: visible;
       }
@@ -4671,14 +4872,14 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
       .timeline-vertical .timeline-tick-label {
         position: absolute;
-        right: calc(100% + 5px);
+        right: calc(100% + 6px);
         top: 50%;
         transform: translateY(-50%);
-        font-size: 0.85em;
+        font-size: 1em;
         font-weight: 500;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
-        color: var(--text-secondary, var(--secondary-text-color));
+        color: var(--primary-text-color, var(--text-primary));
       }
       .timeline-indicator {
         position: absolute;
