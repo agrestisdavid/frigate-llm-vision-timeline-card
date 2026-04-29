@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.9";
+const CARD_VERSION = "0.43.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -3071,9 +3071,27 @@ class FrigateLlmVisionTimelineCard extends LitElement {
 
   _openLightbox(ev, snapUrl) {
     this._lightbox = { ev, url: snapUrl };
+    this.updateComplete.then(() => {
+      const dlg = this.shadowRoot?.querySelector("dialog.lightbox");
+      if (dlg && !dlg.open) {
+        try {
+          dlg.showModal();
+        } catch (e) {
+          /* already open */
+        }
+      }
+    });
   }
 
   _closeLightbox() {
+    const dlg = this.shadowRoot?.querySelector("dialog.lightbox");
+    if (dlg?.open) {
+      try {
+        dlg.close();
+      } catch (e) {
+        /* ignore */
+      }
+    }
     this._lightbox = null;
   }
 
@@ -3874,7 +3892,16 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const lbCam = ev._camera;
     const lbFile = this._extractFilename(ev);
     return html`
-      <div class="lightbox" @click=${() => this._closeLightbox()}>
+      <dialog
+        class="lightbox"
+        @click=${(e) => {
+          if (e.target === e.currentTarget) this._closeLightbox();
+        }}
+        @cancel=${(e) => {
+          e.preventDefault();
+          this._closeLightbox();
+        }}
+      >
         <div class="lightbox-inner" @click=${(e) => e.stopPropagation()}>
           <button class="lightbox-close" @click=${() => this._closeLightbox()}>
             <ha-icon icon="mdi:close"></ha-icon>
@@ -3899,7 +3926,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
           </div>
           ${lbFile ? html`<div class="lightbox-file" title=${lbFile}><ha-icon icon="mdi:file-outline"></ha-icon> ${lbFile}</div>` : ""}
         </div>
-      </div>
+      </dialog>
     `;
   }
 
@@ -4409,16 +4436,29 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         opacity: 0.5;
         cursor: not-allowed;
       }
+      /* Native <dialog> with showModal() lifts the lightbox into the
+         browser's top layer — escapes any parent that has transform /
+         filter / will-change (which would otherwise pin position:fixed
+         to the parent instead of the viewport, leaving the backdrop
+         only over the card). */
       .lightbox {
-        position: fixed;
-        inset: 0;
-        background: rgba(0, 0, 0, 0.6);
-        z-index: 9999;
+        border: none;
+        outline: none;
+        margin: 0;
+        padding: 20px;
+        background: transparent;
+        color: inherit;
+        max-width: 100vw;
+        max-height: 100vh;
+        box-sizing: border-box;
+      }
+      .lightbox[open] {
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 20px;
-        box-sizing: border-box;
+      }
+      .lightbox::backdrop {
+        background: rgba(0, 0, 0, 0.6);
       }
       .lightbox-inner {
         position: relative;
@@ -4813,15 +4853,24 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         border-radius: 8px 0 0 8px;
         overflow: visible;
       }
-      /* Stacked layout (mobile): track halved vs. split. To make 40px
-         work we also shrink the "HH:00" labels (rule below). */
+      /* Stacked layout (mobile): narrower track (40px). The label is
+         centered on the axis line (instead of right-edge inside) and
+         keeps full 1em size with a small card-colored "pill" so it
+         masks the axis line + any event bar passing behind it. */
       .split.is-stacked > .right .timeline-track.timeline-vertical {
         width: 40px;
         min-width: 40px;
         flex: 0 0 40px;
       }
       .split.is-stacked > .right .timeline-vertical .timeline-tick-label {
-        font-size: 0.78em;
+        right: auto;
+        left: 50%;
+        font-size: 1em;
+        transform: translate(-50%, -50%);
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--ha-card-background, var(--card-background-color, #fff));
+        z-index: 2;
       }
 
       /* Flipped layout: events list on the left, axis on the right */
@@ -4854,7 +4903,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         display: flex;
         flex-direction: column;
         gap: 6px;
-        padding: 4px 6px 4px 8px;
+        /* Extra bottom padding so the last row's shadow isn't clipped
+           when the user scrolls all the way down inside a fixed-height
+           container (mobile_height / desktop_height). */
+        padding: 4px 6px 14px 8px;
         background: color-mix(in srgb, var(--text-primary) 3%, transparent);
         border-radius: 0 8px 8px 0;
       }
