@@ -1,0 +1,5 @@
+# Local backup snapshots — never push
+*.backup
+*.backup.js
+*.js.backup
+*.js.gz
