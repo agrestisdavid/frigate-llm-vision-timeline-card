@@ -1,0 +1,5803 @@
+const CARD_VERSION = "0.30.0-local70";
+
+const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
+const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
+const DEFAULT_GO2RTC_MODES = "webrtc,mse,mp4,hls,mjpeg";
+
+function sanitizeGo2rtcModes(modes) {
+  if (typeof modes !== "string") return null;
+  const tokens = modes
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const valid = tokens.filter((t) => VALID_GO2RTC_MODES.includes(t));
+  return valid.length ? valid.join(",") : null;
+}
+
+const STRINGS = {
+  de: {
+    title: "Frigate Zeitachse",
+    loading_events: "Lade Events…",
+    loading_clip: "Lade Clip…",
+    no_events: "Keine Events gefunden.",
+    load_more: "Mehr laden",
+    load_less: "Weniger",
+    refresh: "Neu laden",
+    close: "Schließen",
+    select_to_play: "Wähle einen Event, um den Clip abzuspielen",
+    no_llm: "– keine LLM Vision Beschreibung –",
+    clip_failed: "Clip konnte nicht geladen werden",
+    clip_no_recording: "Für dieses Event ist in Frigate kein Clip verfügbar (keine Aufnahme für dieses Zeitfenster).",
+    event_label: "Event",
+    all_labels: "Alle Labels",
+    all_cameras: "Alle Kameras",
+    all_dates: "Alle Tage",
+    labels_plural: "Labels",
+    cameras_plural: "Kameras",
+    filter_today: "Heute",
+    filter_yesterday: "Gestern",
+    filter_week: "Letzte 7 Tage",
+    filter_all: "Alle",
+    today: "Heute",
+    yesterday: "Gestern",
+    live: "Live",
+    live_connecting: "Verbinde…",
+    live_failed: "Livestream fehlgeschlagen",
+    live_no_camera: "Keine Kamera für Liveansicht verfügbar",
+    timeline_loading: "Lade Aufnahme…",
+    timeline_no_recording: "Keine Aufnahme für diesen Zeitraum",
+    timeline_no_camera: "Keine Kamera für Timeline verfügbar",
+    timeline_failed: "Aufnahme konnte nicht geladen werden",
+    timeline_zoom_in: "Hineinzoomen",
+    timeline_zoom_out: "Herauszoomen",
+    timeline_zoom_reset: "Zoom zurücksetzen",
+    view_events: "Events",
+    view_timeline: "Timeline",
+  },
+  en: {
+    title: "Frigate Timeline",
+    loading_events: "Loading events…",
+    loading_clip: "Loading clip…",
+    no_events: "No events found.",
+    load_more: "Load more",
+    load_less: "Less",
+    refresh: "Refresh",
+    close: "Close",
+    select_to_play: "Select an event to play the clip",
+    no_llm: "– no LLM Vision description –",
+    clip_failed: "Could not load clip",
+    clip_no_recording: "No clip available in Frigate for this event (no recording for this time range).",
+    event_label: "Event",
+    all_labels: "All labels",
+    all_cameras: "All cameras",
+    all_dates: "All days",
+    labels_plural: "labels",
+    cameras_plural: "cameras",
+    filter_today: "Today",
+    filter_yesterday: "Yesterday",
+    filter_week: "Past 7 days",
+    filter_all: "All",
+    today: "Today",
+    yesterday: "Yesterday",
+    live: "Live",
+    live_connecting: "Connecting…",
+    live_failed: "Live stream failed",
+    live_no_camera: "No camera available for live view",
+    timeline_loading: "Loading recording…",
+    timeline_no_recording: "No recording for this period",
+    timeline_no_camera: "No camera available for timeline",
+    timeline_failed: "Could not load recording",
+    timeline_zoom_in: "Zoom in",
+    timeline_zoom_out: "Zoom out",
+    timeline_zoom_reset: "Reset zoom",
+    view_events: "Events",
+    view_timeline: "Timeline",
+  },
+};
+
+import {
+  LitElement,
+  html,
+  css,
+} from "https://unpkg.com/lit-element@2.5.1/lit-element.js?module";
+
+const HLS_SRC = "https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js";
+let _hlsLoadPromise = null;
+function loadHls() {
+  if (window.Hls) return Promise.resolve(window.Hls);
+  if (_hlsLoadPromise) return _hlsLoadPromise;
+  _hlsLoadPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = HLS_SRC;
+    s.onload = () => resolve(window.Hls);
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  return _hlsLoadPromise;
+}
+
+/* ───────── go2rtc URL resolution (shared by main card + tile) ───────── */
+
+function isLocalNetwork() {
+  const h = location.hostname;
+  if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
+  if (/^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return true;
+  if (/^fd[0-9a-f]{2}:/i.test(h)) return true;
+  return false;
+}
+
+function go2rtcBase(config) {
+  if (isLocalNetwork()) {
+    const u = config.go2rtc_url;
+    if (u && typeof u === "string") return u.replace(/\/+$/, "");
+    const f = config.frigate_url;
+    if (f && typeof f === "string") return `${f.replace(/\/+$/, "")}/api/go2rtc`;
+  } else {
+    const ue = config.go2rtc_url_external;
+    if (ue && typeof ue === "string") return ue.replace(/\/+$/, "");
+    // Fallback to internal (VPN/Tailscale)
+    const u = config.go2rtc_url;
+    if (u && typeof u === "string") return u.replace(/\/+$/, "");
+  }
+  return null;
+}
+
+function go2rtcHttpUrl(config, rest, cameraName) {
+  const base = go2rtcBase(config);
+  if (!base) return "";
+  const q = `src=${encodeURIComponent(cameraName)}`;
+  return `${base}/api/${rest}?${q}`;
+}
+
+function go2rtcWsUrl(config, cameraName) {
+  const base = go2rtcBase(config);
+  if (!base) return "";
+  return `${base.replace(/^http/, "ws")}/api/ws?src=${encodeURIComponent(cameraName)}`;
+}
+
+/* ───────── Frigate event helpers ───────── */
+
+const EVENT_ID_RE = /(\d{10}\.\d+-[a-z0-9]+)/i;
+function parseFrigateEventId(mediaContentId) {
+  if (!mediaContentId) return null;
+  const m = mediaContentId.match(EVENT_ID_RE);
+  return m ? m[1] : null;
+}
+
+const DATE_RE = /(\d{4}-\d{2}-\d{2})[\s_T](\d{2}:\d{2}:\d{2})/;
+const LABEL_RE = /\b(person|persons|people|car|cars|dog|cat|bicycle|motorcycle|bird|package|bus|truck|mouse)\b/i;
+const EVENT_ID_TS_RE = /^(\d+\.?\d*)-/;
+function parseClipMeta(title, eventId = null) {
+  let ts = null;
+  let label = null;
+  // Prefer event-id timestamp (Unix seconds, unambiguous UTC) over the title
+  if (eventId) {
+    const m = eventId.match(EVENT_ID_TS_RE);
+    if (m) {
+      const sec = parseFloat(m[1]);
+      if (isFinite(sec) && sec > 0) ts = new Date(sec * 1000);
+    }
+  }
+  if (!ts && title) {
+    const dm = title.match(DATE_RE);
+    if (dm) ts = new Date(`${dm[1]}T${dm[2]}`);
+  }
+  if (title) {
+    const lm = title.match(LABEL_RE);
+    if (lm) label = lm[1].toLowerCase();
+  }
+  return { ts, label };
+}
+
+function formatTime(d, t) {
+  if (!d || isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  const today = new Date();
+  const yesterday = new Date(Date.now() - 86400000);
+  const isToday = d.toDateString() === today.toDateString();
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  if (isToday) return `${t.today}, ${time}`;
+  if (isYesterday) return `${t.yesterday}, ${time}`;
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}., ${time}`;
+}
+
+const LLM_TITLE_DE = {
+  "motion detected": "Bewegung erkannt",
+  "person detected": "Person erkannt",
+  "multiple people detected": "Mehrere Personen erkannt",
+  "people detected": "Personen erkannt",
+  "car detected": "Auto erkannt",
+  "vehicle detected": "Fahrzeug erkannt",
+  "dog detected": "Hund erkannt",
+  "cat detected": "Katze erkannt",
+  "package detected": "Paket erkannt",
+  "bird detected": "Vogel erkannt",
+  "bicycle detected": "Fahrrad erkannt",
+  "motorcycle detected": "Motorrad erkannt",
+  "no activity observed": "Keine Aktivität",
+  "unknown": "Unbekannt",
+};
+
+const LABEL_DE = {
+  person: "Person",
+  persons: "Personen",
+  people: "Personen",
+  car: "Auto",
+  cars: "Autos",
+  vehicle: "Fahrzeug",
+  truck: "LKW",
+  bus: "Bus",
+  dog: "Hund",
+  cat: "Katze",
+  bird: "Vogel",
+  package: "Paket",
+  bicycle: "Fahrrad",
+  motorcycle: "Motorrad",
+  mouse: "Maus",
+  face: "Gesicht",
+  license_plate: "Kennzeichen",
+  amazon: "Amazon",
+  dhl: "DHL",
+  ups: "UPS",
+  fedex: "FedEx",
+  usps: "USPS",
+};
+function translateLabel(label, lang) {
+  if (!label) return "";
+  const key = label.trim().toLowerCase();
+  if (lang === "de" && LABEL_DE[key]) return LABEL_DE[key];
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+const LABEL_ICONS = {
+  person: "mdi:account-alert",
+  persons: "mdi:account-group",
+  people: "mdi:account-group",
+  face: "mdi:face-recognition",
+  car: "mdi:car-sports",
+  cars: "mdi:car-multiple",
+  vehicle: "mdi:car-sports",
+  truck: "mdi:truck",
+  bus: "mdi:bus",
+  motorcycle: "mdi:motorbike",
+  bicycle: "mdi:bike",
+  dog: "mdi:dog",
+  cat: "mdi:cat",
+  bird: "mdi:bird",
+  mouse: "mdi:rodent",
+  package: "mdi:package-variant-closed",
+  license_plate: "mdi:card-text-outline",
+  amazon: "mdi:package-variant",
+  dhl: "mdi:truck-delivery",
+  ups: "mdi:truck-delivery",
+  fedex: "mdi:truck-delivery",
+  usps: "mdi:truck-delivery",
+};
+function labelIcon(rawLabel, userMap) {
+  if (!rawLabel) return null;
+  const key = String(rawLabel).trim().toLowerCase();
+  if (userMap && typeof userMap === "object" && userMap[key]) return userMap[key];
+  return LABEL_ICONS[key] || "mdi:tag";
+}
+function labelColor(rawLabel, userMap) {
+  if (!rawLabel) return null;
+  const key = String(rawLabel).trim().toLowerCase();
+  if (userMap && typeof userMap === "object") {
+    if (userMap[key]) return String(userMap[key]);
+    if (userMap.default) return String(userMap.default);
+  }
+  return null;
+}
+
+function translateLlmTitle(title, lang) {
+  if (!title) return title;
+  if (lang !== "de") return title;
+  const key = title.trim().toLowerCase();
+  if (LLM_TITLE_DE[key]) return LLM_TITLE_DE[key];
+  let out = title;
+  out = out.replace(/\bdetected\b/gi, "erkannt");
+  out = out.replace(/\bperson\b/gi, "Person");
+  out = out.replace(/\bpeople\b/gi, "Personen");
+  out = out.replace(/\bmotion\b/gi, "Bewegung");
+  out = out.replace(/\bcar\b/gi, "Auto");
+  out = out.replace(/\bvehicle\b/gi, "Fahrzeug");
+  out = out.replace(/\bdog\b/gi, "Hund");
+  out = out.replace(/\bcat\b/gi, "Katze");
+  out = out.replace(/\bpackage\b/gi, "Paket");
+  out = out.replace(/\bbird\b/gi, "Vogel");
+  out = out.replace(/\bbicycle\b/gi, "Fahrrad");
+  out = out.replace(/\bmotorcycle\b/gi, "Motorrad");
+  return out;
+}
+
+function detectLang(hass, override) {
+  if (override && override !== "auto") return STRINGS[override] ? override : "en";
+  const l =
+    (hass?.locale?.language || hass?.language || navigator?.language || "en")
+      .toLowerCase()
+      .split("-")[0];
+  return STRINGS[l] ? l : "en";
+}
+
+/* ───────── Shared Livestream controller ─────────
+ * Encapsulates go2rtc protocol negotiation (WebRTC/MSE/HLS/MP4/MJPEG),
+ * stream lifecycle and cleanup. Used by both the main card and the
+ * multiview tile so the protocol logic exists once.
+ */
+class LivestreamController {
+  constructor(opts) {
+    // opts: { getConfig, getVideoEl, getStreamName, onState, onUpdate, logPrefix, failedMessage }
+    this._opts = opts;
+    this._isHD = false;
+    this._cameraId = null;
+    this._peerConnection = null;
+    this._mediaSource = null;
+    this._sourceBuffer = null;
+    this._mseBuf = null;
+    this._mseBufLen = 0;
+    this._go2rtcWs = null;
+    this._mjpegRefreshTimer = null;
+    this._mseReady = null;
+    this._mseFailed = null;
+  }
+
+  get isHD() { return this._isHD; }
+  get cameraId() { return this._cameraId; }
+
+  _config() { return this._opts.getConfig(); }
+  _videoEl() { return this._opts.getVideoEl(); }
+  _streamName() { return this._opts.getStreamName(this._isHD); }
+  _setState(patch) { this._opts.onState(patch); }
+  _waitUpdate() { return this._opts.onUpdate(); }
+  _log(...args) { console.info(this._opts.logPrefix || "[Livestream]", ...args); }
+  _warn(...args) { console.warn(this._opts.logPrefix || "[Livestream]", ...args); }
+
+  _isIOS() {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod/.test(ua)) return true;
+    return /Mac/.test(ua) && navigator.maxTouchPoints > 1;
+  }
+  _isExternal() { return !isLocalNetwork(); }
+  _hlsNativeSupported() {
+    const v = document.createElement("video");
+    return !!v.canPlayType && v.canPlayType("application/vnd.apple.mpegurl") !== "";
+  }
+  _supportedMSECodecs() {
+    const MS = window.ManagedMediaSource || window.MediaSource;
+    if (!MS) return "";
+    const codecs = [
+      "avc1.640029",      // H.264 high 4.1
+      "avc1.64002A",      // H.264 high 4.2
+      "avc1.640033",      // H.264 high 5.1
+      "hvc1.1.6.L153.B0", // H.265 main 5.1
+      "mp4a.40.2",        // AAC LC
+      "mp4a.40.5",        // AAC HE
+      "flac",
+      "opus",
+    ];
+    return codecs
+      .filter((c) => MS.isTypeSupported(`video/mp4; codecs="${c}"`))
+      .join(",");
+  }
+  _checkMixedContent(url) {
+    if (typeof location === "undefined") return;
+    if (location.protocol !== "https:") return;
+    if (!/^http:\/\//i.test(url)) return;
+    const msg = "Mixed Content: HA ist HTTPS, go2rtc_url ist HTTP. Browser blockiert den Request.";
+    this._warn(msg, url);
+    throw new Error(msg);
+  }
+  _waitForIceGathering(pc, timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") { resolve(); return; }
+      const timer = setTimeout(resolve, timeoutMs);
+      pc.addEventListener("icegatheringstatechange", () => {
+        if (pc.iceGatheringState === "complete") { clearTimeout(timer); resolve(); }
+      });
+    });
+  }
+  _withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+      promise.then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); reject(e); }
+      );
+    });
+  }
+  async _tryAutoplay(videoEl) {
+    try { await videoEl.play(); }
+    catch (e) {
+      if (e && (e.name === "NotAllowedError" || e.name === "AbortError")) {
+        videoEl.muted = true;
+        try { await videoEl.play(); } catch {}
+      }
+    }
+  }
+  _describeMediaError(videoEl) {
+    const err = videoEl?.error;
+    if (!err) return "unknown error";
+    const codes = {
+      1: "MEDIA_ERR_ABORTED",
+      2: "MEDIA_ERR_NETWORK",
+      3: "MEDIA_ERR_DECODE",
+      4: "MEDIA_ERR_SRC_NOT_SUPPORTED",
+    };
+    return `${codes[err.code] || `code ${err.code}`}${err.message ? ": " + err.message : ""}`;
+  }
+
+  _go2rtcBase() { return go2rtcBase(this._config()); }
+  _go2rtcWebrtcUrl(name) { return go2rtcHttpUrl(this._config(), "webrtc", name); }
+  _go2rtcWsUrl(name) { return go2rtcWsUrl(this._config(), name); }
+  _hlsStreamPath(name) { return `${go2rtcHttpUrl(this._config(), "stream.m3u8", name)}&mp4=flac`; }
+  _mp4StreamPath(name) { return go2rtcHttpUrl(this._config(), "stream.mp4", name); }
+  _mjpegStreamPath(name) { return go2rtcHttpUrl(this._config(), "stream.mjpeg", name); }
+
+  /* WebRTC via HTTP (WHIP-style) */
+  async _startWebRTCviaHTTP(name, videoEl) {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      bundlePolicy: "max-bundle",
+    });
+    this._peerConnection = pc;
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+
+    const trackPromise = new Promise((resolveTrack, rejectTrack) => {
+      const t = setTimeout(() => rejectTrack(new Error("WebRTC track timeout")), 6000);
+      pc.ontrack = (ev) => {
+        this._log("WebRTC-HTTP: track", ev.track.kind);
+        if (!videoEl.srcObject) videoEl.srcObject = new MediaStream();
+        try { videoEl.srcObject.addTrack(ev.track); } catch {}
+        this._setState({ loading: false, provider: "webrtc" });
+        this._tryAutoplay(videoEl);
+        clearTimeout(t);
+        resolveTrack();
+      };
+      pc.addEventListener("iceconnectionstatechange", () => {
+        this._log("WebRTC-HTTP: iceState", pc.iceConnectionState);
+        if (pc.iceConnectionState === "failed") {
+          clearTimeout(t);
+          rejectTrack(new Error("WebRTC ICE failed"));
+        }
+      });
+    });
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await this._waitForIceGathering(pc, 2500);
+    const url = this._go2rtcWebrtcUrl(name);
+    this._checkMixedContent(url);
+    this._log("WebRTC-HTTP: POST", url);
+    const ctrl = new AbortController();
+    const abortTimer = setTimeout(() => ctrl.abort(), 5000);
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: { "Content-Type": "text/plain" },
+        body: pc.localDescription.sdp,
+      });
+    } catch (e) {
+      clearTimeout(abortTimer);
+      throw new Error(`WebRTC fetch failed: ${e.name === "AbortError" ? "timeout" : e.message}`);
+    }
+    clearTimeout(abortTimer);
+    if (!resp.ok) throw new Error(`WebRTC offer failed: ${resp.status}`);
+    const body = await resp.text();
+    let answerSdp;
+    if (body.trimStart().startsWith("{")) {
+      try { answerSdp = JSON.parse(body).sdp; }
+      catch (e) { throw new Error(`WebRTC answer parse: ${e.message}`); }
+    } else {
+      answerSdp = body;
+    }
+    if (!answerSdp) throw new Error("WebRTC empty answer SDP");
+    await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    this._log("WebRTC-HTTP: remote desc set, waiting for track");
+    await trackPromise;
+  }
+
+  /* WebRTC via WebSocket signaling */
+  async _startWebRTCviaWS(name, videoEl) {
+    const ws = await this._openGo2rtcWs(name);
+    this._log("WebRTC-WS: opened");
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      bundlePolicy: "max-bundle",
+    });
+    this._peerConnection = pc;
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let answerReceived = false;
+      let candidatesIn = 0;
+      let candidatesOut = 0;
+      const timeout = setTimeout(() => finish(new Error(
+        `WebRTC-WS timeout — answer=${answerReceived}, candidatesIn=${candidatesIn}, candidatesOut=${candidatesOut}, iceState=${pc.iceConnectionState}, iceGath=${pc.iceGatheringState}`
+      )), 12000);
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeout);
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        if (err) reject(err); else resolve();
+      };
+      pc.ontrack = (ev) => {
+        this._log("WebRTC-WS: track", ev.track.kind);
+        if (!videoEl.srcObject) videoEl.srcObject = new MediaStream();
+        try { videoEl.srcObject.addTrack(ev.track); } catch {}
+        this._setState({ loading: false, provider: "webrtc" });
+        this._tryAutoplay(videoEl);
+        finish();
+      };
+      pc.onicecandidate = (ev) => {
+        if (ev.candidate && ws.readyState === 1) {
+          candidatesOut++;
+          try {
+            ws.send(JSON.stringify({ type: "webrtc/candidate", value: ev.candidate.candidate }));
+          } catch {}
+        } else if (!ev.candidate) {
+          this._log("WebRTC-WS: ICE gathering complete, sent", candidatesOut, "candidates");
+        }
+      };
+      pc.addEventListener("iceconnectionstatechange", () => {
+        this._log("WebRTC-WS: iceState", pc.iceConnectionState);
+        if (pc.iceConnectionState === "failed") finish(new Error("ICE failed"));
+      });
+      pc.addEventListener("connectionstatechange", () => {
+        this._log("WebRTC-WS: connState", pc.connectionState);
+      });
+      ws.onmessage = async (msg) => {
+        if (typeof msg.data !== "string") return;
+        let data;
+        try { data = JSON.parse(msg.data); } catch { return; }
+        this._log("WebRTC-WS: msg", data.type);
+        if (data.type === "webrtc/answer") {
+          answerReceived = true;
+          try {
+            await pc.setRemoteDescription({ type: "answer", sdp: data.value });
+            this._log("WebRTC-WS: remote desc set");
+          } catch (e) {
+            finish(new Error(`setRemoteDescription: ${e.message}`));
+          }
+        } else if (data.type === "webrtc/candidate" && data.value) {
+          candidatesIn++;
+          try { await pc.addIceCandidate({ candidate: data.value, sdpMid: "0" }); }
+          catch (e) { this._warn("WebRTC-WS: bad candidate:", data.value, e?.message); }
+        } else if (data.type === "error") {
+          finish(new Error(`server error: ${data.value}`));
+        }
+      };
+      ws.onerror = () => finish(new Error("WS error during WebRTC signaling"));
+      ws.onclose = () => { if (!done) finish(new Error("WS closed during WebRTC signaling")); };
+      (async () => {
+        try {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await this._waitForIceGathering(pc, 2500);
+          this._log("WebRTC-WS: sending offer (post-gather)");
+          ws.send(JSON.stringify({ type: "webrtc/offer", value: pc.localDescription.sdp }));
+        } catch (e) {
+          finish(e);
+        }
+      })();
+    });
+  }
+
+  _openGo2rtcWs(name) {
+    return new Promise((resolve, reject) => {
+      const url = this._go2rtcWsUrl(name);
+      if (location.protocol === "https:" && /^ws:\/\//i.test(url)) {
+        reject(new Error("Mixed Content: HTTPS Seite kann kein ws:// laden. go2rtc_url_external mit https:// konfigurieren."));
+        return;
+      }
+      const ws = new WebSocket(url);
+      this._go2rtcWs = ws;
+      ws.binaryType = "arraybuffer";
+      const timeout = setTimeout(() => { ws.close(); reject(new Error("WebSocket timeout")); }, 5000);
+      ws.onopen = () => { clearTimeout(timeout); resolve(ws); };
+      ws.onerror = (e) => { clearTimeout(timeout); reject(e); };
+      ws.onclose = () => {};
+    });
+  }
+
+  /* MSE */
+  async _startMSE(ws, videoEl) {
+    const MS = window.ManagedMediaSource || window.MediaSource;
+    if (!MS) throw new Error("MSE not supported");
+    const ms = new MS();
+    this._mediaSource = ms;
+    this._sourceBuffer = null;
+    this._mseBuf = new Uint8Array(2 * 1024 * 1024);
+    this._mseBufLen = 0;
+    this._setState({ provider: "mse" });
+
+    if (window.ManagedMediaSource) {
+      videoEl.disableRemotePlayback = true;
+      videoEl.srcObject = ms;
+    } else {
+      videoEl.src = URL.createObjectURL(ms);
+      videoEl.srcObject = null;
+    }
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    this._tryAutoplay(videoEl);
+
+    const codecs = this._supportedMSECodecs();
+    this._log("MSE supported codecs:", codecs);
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("MSE no data within 15s")), 15000);
+      this._mseReady = () => {
+        clearTimeout(timeout);
+        this._mseReady = null;
+        this._setState({ loading: false });
+        resolve();
+      };
+      this._mseFailed = (msg) => {
+        clearTimeout(timeout);
+        this._mseReady = null;
+        this._mseFailed = null;
+        reject(new Error(msg));
+      };
+      ws.onmessage = (msg) => this._handleGo2rtcMessage(msg, videoEl);
+      ms.addEventListener("sourceopen", () => {
+        this._log("MSE sourceopen, sending codecs");
+        if (window.ManagedMediaSource) {
+          try { URL.revokeObjectURL(videoEl.src); } catch {}
+        }
+        try { ws.send(JSON.stringify({ type: "mse", value: codecs })); }
+        catch (e) { clearTimeout(timeout); reject(e); }
+      }, { once: true });
+    });
+  }
+  _handleGo2rtcMessage(msg, videoEl) {
+    if (typeof msg.data === "string") {
+      let data;
+      try { data = JSON.parse(msg.data); } catch { return; }
+      if (data.type === "mse") {
+        const mime = data.value;
+        this._log("MSE codec from server:", mime);
+        if (this._mediaSource && !this._sourceBuffer) {
+          try {
+            const sb = this._mediaSource.addSourceBuffer(mime);
+            sb.mode = "segments";
+            this._sourceBuffer = sb;
+            sb.addEventListener("updateend", () => {
+              if (!sb.updating && this._mseBufLen > 0) {
+                try {
+                  sb.appendBuffer(this._mseBuf.slice(0, this._mseBufLen));
+                  this._mseBufLen = 0;
+                } catch {}
+              }
+              if (!sb.updating && sb.buffered && sb.buffered.length) {
+                const end = sb.buffered.end(sb.buffered.length - 1);
+                const start = end - 5;
+                const start0 = sb.buffered.start(0);
+                if (start > start0) {
+                  try { sb.remove(start0, start); } catch {}
+                  try { this._mediaSource.setLiveSeekableRange(start, end); } catch {}
+                }
+                if (videoEl.currentTime < start) videoEl.currentTime = start;
+              }
+            });
+            this._setState({ loading: false });
+            if (this._mseReady) this._mseReady();
+          } catch (e) {
+            this._warn("MSE addSourceBuffer failed:", e);
+            if (this._mseFailed) this._mseFailed(`addSourceBuffer: ${e.message}`);
+          }
+        }
+      }
+    } else {
+      this._handleMSEData(msg.data);
+    }
+  }
+  _handleMSEData(data) {
+    const sb = this._sourceBuffer;
+    if (!sb) return;
+    if (sb.updating || this._mseBufLen > 0) {
+      const b = new Uint8Array(data);
+      const required = this._mseBufLen + b.byteLength;
+      if (required > this._mseBuf.length) {
+        const grown = new Uint8Array(Math.max(required, this._mseBuf.length * 2));
+        grown.set(this._mseBuf.subarray(0, this._mseBufLen), 0);
+        this._mseBuf = grown;
+      }
+      this._mseBuf.set(b, this._mseBufLen);
+      this._mseBufLen += b.byteLength;
+    } else {
+      try { sb.appendBuffer(data); } catch {}
+    }
+  }
+
+  /* HLS native */
+  async _startHLS(name) {
+    if (!this._hlsNativeSupported()) throw new Error("HLS native not supported in this browser");
+    const url = this._hlsStreamPath(name);
+    this._checkMixedContent(url);
+    return new Promise((resolve, reject) => {
+      this._setState({ provider: "hls" });
+      const timeout = setTimeout(() => { cleanup(); reject(new Error("HLS load timeout")); }, 8000);
+      const cleanup = () => {
+        clearTimeout(timeout);
+        const el = this._videoEl();
+        if (el) {
+          el.removeEventListener("loadeddata", onLoaded);
+          el.removeEventListener("error", onError);
+        }
+      };
+      const onLoaded = () => {
+        cleanup();
+        this._setState({ loading: false });
+        const el = this._videoEl();
+        if (el) this._tryAutoplay(el);
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        const el = this._videoEl();
+        reject(new Error(`HLS error: ${this._describeMediaError(el)}`));
+      };
+      this._waitUpdate().then(() => {
+        const el = this._videoEl();
+        if (!el) { cleanup(); reject(new Error("No video element")); return; }
+        el.addEventListener("loadeddata", onLoaded, { once: true });
+        el.addEventListener("error", onError, { once: true });
+        el.src = url;
+        el.load();
+      });
+    });
+  }
+
+  /* MP4 progressive */
+  async _startMP4(name) {
+    const url = this._mp4StreamPath(name);
+    this._checkMixedContent(url);
+    return new Promise((resolve, reject) => {
+      this._setState({ provider: "mp4", mp4Url: url });
+      const timeout = setTimeout(() => { cleanup(); reject(new Error("MP4 load timeout")); }, 6000);
+      const cleanup = () => {
+        clearTimeout(timeout);
+        const el = this._videoEl();
+        if (el) {
+          el.removeEventListener("loadeddata", onLoaded);
+          el.removeEventListener("error", onError);
+        }
+      };
+      const onLoaded = () => {
+        cleanup();
+        this._setState({ loading: false });
+        const el = this._videoEl();
+        if (el) this._tryAutoplay(el);
+        resolve();
+      };
+      const onError = () => {
+        cleanup();
+        const el = this._videoEl();
+        reject(new Error(`MP4 error: ${this._describeMediaError(el)}`));
+      };
+      this._waitUpdate().then(() => {
+        const el = this._videoEl();
+        if (!el) { cleanup(); reject(new Error("No video element")); return; }
+        el.addEventListener("loadeddata", onLoaded, { once: true });
+        el.addEventListener("error", onError, { once: true });
+        el.src = url;
+        el.load();
+      });
+    });
+  }
+
+  /* MJPEG */
+  _startMJPEG(name) {
+    this._setState({
+      provider: "mjpeg",
+      loading: false,
+      mjpegUrl: this._mjpegStreamPath(name),
+    });
+    this._cleanupMJPEG(false);
+    this._mjpegRefreshTimer = setInterval(() => {
+      if (!this._cameraId) return;
+      const sname = this._opts.getStreamName(this._isHD);
+      this._setState({ mjpegUrl: this._mjpegStreamPath(sname) });
+    }, 8 * 60 * 1000);
+  }
+
+  /* Orchestrator */
+  async start(cameraId) {
+    this._cameraId = cameraId;
+    const streamName = this._streamName();
+    this._log("start: cam=", cameraId, "stream=", streamName, "hd=", this._isHD);
+    const defaultModes = this._isIOS() ? "webrtc,hls,mp4,mjpeg" : DEFAULT_GO2RTC_MODES;
+    const configured = this._config().go2rtc_modes || defaultModes;
+    const modes = configured.split(",").map((s) => s.trim().toLowerCase());
+
+    const failures = [];
+    for (const mode of modes) {
+      if (this._cameraId !== cameraId) return;
+      const videoEl = this._videoEl();
+      try {
+        if (mode === "webrtc" && window.RTCPeerConnection) {
+          if (!videoEl) continue;
+          let lastErr = null;
+          try {
+            await this._withTimeout(this._startWebRTCviaHTTP(streamName, videoEl), 12000, "WebRTC-HTTP");
+            this._log("WebRTC (HTTP/WHIP) connected:", streamName);
+            return;
+          } catch (e) {
+            lastErr = e;
+            this._warn("WebRTC-HTTP failed:", e?.message || e);
+            this._cleanupWebRTC();
+          }
+          try {
+            await this._withTimeout(this._startWebRTCviaWS(streamName, videoEl), 15000, "WebRTC-WS");
+            this._log("WebRTC (WS) connected:", streamName);
+            return;
+          } catch (e) {
+            lastErr = e;
+            this._cleanupWebRTC();
+            this._cleanupGo2rtcWs();
+            throw lastErr || e;
+          }
+        } else if (mode === "mse" && (window.MediaSource || window.ManagedMediaSource)) {
+          if (!videoEl) continue;
+          const ws = await this._withTimeout(this._openGo2rtcWs(streamName), 5000, "MSE WS");
+          await this._withTimeout(this._startMSE(ws, videoEl), 8000, "MSE setup");
+          this._log("MSE connected:", streamName);
+          return;
+        } else if (mode === "mp4") {
+          await this._withTimeout(this._startMP4(streamName), 8000, "MP4");
+          this._log("MP4 connected:", streamName);
+          return;
+        } else if (mode === "hls") {
+          await this._withTimeout(this._startHLS(streamName), 10000, "HLS");
+          this._log("HLS connected:", streamName);
+          return;
+        } else if (mode === "mjpeg") {
+          this._startMJPEG(streamName);
+          this._log("MJPEG started:", streamName);
+          return;
+        }
+      } catch (e) {
+        const msg = e?.message || String(e);
+        this._warn(`${mode} failed:`, msg);
+        failures.push(`${mode}: ${msg}`);
+        if (mode === "webrtc") this._cleanupWebRTC();
+        if (mode === "mse") { this._cleanupMSE(); this._cleanupGo2rtcWs(); }
+        if (mode === "mp4") this._cleanupMP4();
+      }
+    }
+
+    if (this._isHD) {
+      this._warn("HD stream failed (likely H.265), falling back to SD:", failures);
+      this._isHD = false;
+      this.cleanup();
+      this._setState({ loading: true, provider: null, error: null });
+      await this._waitUpdate();
+      return this.start(cameraId);
+    }
+
+    const errMsg = !this._go2rtcBase()
+      ? (this._isExternal()
+          ? "go2rtc_url_external muss konfiguriert sein!"
+          : "go2rtc_url oder frigate_url muss konfiguriert sein!")
+      : (this._opts.failedMessage || "Live stream failed");
+    this._setState({ error: errMsg, loading: false });
+  }
+
+  setHD(hd) {
+    if (this._isHD === !!hd) return;
+    this._isHD = !!hd;
+    this._log("Switching to", this._isHD ? "HD" : "SD");
+    const cam = this._cameraId;
+    this.cleanup();
+    this._setState({ loading: true, provider: null, error: null });
+    if (cam) this._waitUpdate().then(() => this.start(cam));
+  }
+  toggleHD() { this.setHD(!this._isHD); }
+
+  restart() {
+    const cam = this._cameraId;
+    if (!cam) return;
+    this.cleanup();
+    this._setState({ loading: true, provider: null, error: null });
+    this._waitUpdate().then(() => this.start(cam));
+  }
+
+  switchCamera(cameraId) {
+    if (cameraId === this._cameraId) return;
+    this.cleanup();
+    this._cameraId = cameraId;
+    this._isHD = false;
+    this._setState({ loading: true, provider: null, error: null });
+    this._waitUpdate().then(() => this.start(cameraId));
+  }
+
+  /* Cleanup */
+  cleanup() {
+    this._cameraId = null;
+    this._cleanupWebRTC();
+    this._cleanupMSE();
+    this._cleanupGo2rtcWs();
+    this._cleanupMJPEG();
+    this._cleanupMP4();
+    const v = this._videoEl();
+    if (v) {
+      try { v.pause(); } catch {}
+      try { v.srcObject = null; } catch {}
+      v.removeAttribute("src");
+      try { v.load(); } catch {}
+    }
+  }
+  _cleanupMP4() { this._setState({ mp4Url: null }); }
+  _cleanupWebRTC() {
+    if (this._peerConnection) {
+      try { this._peerConnection.close(); } catch {}
+      this._peerConnection = null;
+    }
+  }
+  _cleanupMSE() {
+    if (this._sourceBuffer) {
+      try { this._mediaSource?.removeSourceBuffer(this._sourceBuffer); } catch {}
+      this._sourceBuffer = null;
+    }
+    if (this._mediaSource) {
+      if (this._mediaSource.readyState === "open") {
+        try { this._mediaSource.endOfStream(); } catch {}
+      }
+      this._mediaSource = null;
+    }
+    this._mseBuf = null;
+    this._mseBufLen = 0;
+  }
+  _cleanupGo2rtcWs() {
+    if (this._go2rtcWs) {
+      this._go2rtcWs.onmessage = null;
+      this._go2rtcWs.onerror = null;
+      this._go2rtcWs.onclose = null;
+      try { this._go2rtcWs.close(); } catch {}
+      this._go2rtcWs = null;
+    }
+  }
+  _cleanupMJPEG(clearUrl = true) {
+    if (this._mjpegRefreshTimer) {
+      clearInterval(this._mjpegRefreshTimer);
+      this._mjpegRefreshTimer = null;
+    }
+    if (clearUrl) this._setState({ mjpegUrl: null });
+  }
+}
+
+class FrigateLlmVisionTimelineCard extends LitElement {
+  static get properties() {
+    return {
+      hass: { type: Object },
+      _config: { state: true },
+      _events: { state: true },
+      _llmEvents: { state: true },
+      _loading: { state: true },
+      _error: { state: true },
+      _activeClip: { state: true },
+      _clipUrl: { state: true },
+      _clipError: { state: true },
+      _lightbox: { state: true },
+      _totalCap: { state: true },
+      _availableCameras: { state: true },
+      _thumbCache: { state: true },
+      _activeLabels: { state: true },
+      _dateFilter: { state: true },
+      _activeCameras: { state: true },
+      _showLabelMenu: { state: true },
+      _showDateMenu: { state: true },
+      _showCameraMenu: { state: true },
+      _showLiveCamMenu: { state: true },
+      _cardWidth: { state: true },
+      _liveMode: { state: true },
+      _liveCamera: { state: true },
+      _liveError: { state: true },
+      _liveProvider: { state: true },
+      _liveLoading: { state: true },
+      _isHD: { state: true },
+      _mjpegSignedUrl: { state: true },
+      _mp4SignedUrl: { state: true },
+      _timelineCamera: { state: true },
+      _timelineLoading: { state: true },
+      _timelineError: { state: true },
+      _timelinePlayerTime: { state: true },
+      _timelineHourStart: { state: true },
+      _timelineZoomLevel: { state: true },
+      _timelineZoomCenter: { state: true },
+      _timelineCurrentSegment: { state: true },
+      _timelineManifestPath: { state: true },
+    };
+  }
+
+  constructor() {
+    super();
+    this._events = [];
+    this._llmEvents = [];
+    this._loading = false;
+    this._error = null;
+    this._activeClip = null;
+    this._clipUrl = null;
+    this._clipError = null;
+    this._lightbox = null;
+    this._totalCap = null;
+    this._availableCameras = [];
+    this._thumbCache = {};
+    this._activeLabels = null;
+    this._dateFilter = "all";
+    this._activeCameras = null;
+    this._showLabelMenu = false;
+    this._showDateMenu = false;
+    this._showCameraMenu = false;
+    this._showLiveCamMenu = false;
+    this._cardWidth = 0;
+    this._resizeObserver = null;
+    this._hls = null;
+    this._fetchToken = 0;
+    this._hasFetchedOnce = false;
+    this._preferMp4Cams = new Set();
+    this._liveMode = false;
+    this._liveCamera = null;
+    this._liveError = null;
+    this._liveProvider = null;
+    this._liveLoading = false;
+    this._isHD = false;
+    this._mjpegSignedUrl = null;
+    this._mp4SignedUrl = null;
+    this._lc = null;
+    this._timelineCamera = null;
+    this._timelineLoading = false;
+    this._timelineError = null;
+    this._timelinePlayerTime = 0;
+    this._timelineHls = null;
+    this._timelineRangeStart = 0;
+    this._timelineRangeEnd = 0;
+    this._timelineHourStart = 0;
+    this._timelinePendingSeekSec = null;
+    this._timelineZoomLevel = 1;
+    this._timelineZoomCenter = 0;
+    this._timelineCurrentSegment = null;
+    this._timelineManifestPath = null;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    console.info(`[FrigateLLMCard] v${CARD_VERSION} connected (iOS=${this._isIOS()}, SafariDesktop=${this._isSafariDesktop()})`);
+    if (window.ResizeObserver) {
+      this._resizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const w = Math.round(entry.contentRect.width);
+          if (w && w !== this._cardWidth) this._cardWidth = w;
+        }
+      });
+      this.updateComplete.then(() => {
+        if (this._resizeObserver && this.isConnected) {
+          this._resizeObserver.observe(this);
+        }
+      });
+    }
+    this._setupIOSTouchFallback();
+    this._onHashChange = () => this._checkHashForClip();
+    window.addEventListener("hashchange", this._onHashChange);
+    this._onLocationChanged = () => this._checkHashForClip();
+    window.addEventListener("location-changed", this._onLocationChanged);
+    this._setupAutoRefresh();
+  }
+
+  _setupAutoRefresh() {
+    this._clearAutoRefresh();
+    const sec = this._config?.auto_refresh_seconds || 0;
+    if (sec <= 0) return;
+    this._autoRefreshTimer = setInterval(() => {
+      if (!this.isConnected) return;
+      if (this._loading) return;
+      if (document.hidden) return;
+      this._fetchAll();
+    }, sec * 1000);
+  }
+
+  _clearAutoRefresh() {
+    if (this._autoRefreshTimer) {
+      clearInterval(this._autoRefreshTimer);
+      this._autoRefreshTimer = null;
+    }
+  }
+
+  _setupIOSTouchFallback() {
+    if (this._iosTouchFallbackAttached) return;
+    if (typeof navigator === "undefined" || !navigator.maxTouchPoints) return;
+    this._iosTouchFallbackAttached = true;
+    const INTERACTIVE = [
+      "control-btn", "iconbtn", "cam-close", "closebtn",
+      "overlay-btn", "filter-btn", "loadmore", "loadless",
+    ];
+    this.shadowRoot.addEventListener("touchend", (e) => {
+      const path = e.composedPath();
+      const btn = path.find((el) =>
+        el.classList && INTERACTIVE.some((cls) => el.classList.contains(cls))
+      );
+      if (!btn) return;
+      e.preventDefault();
+      btn.click();
+    }, { passive: false });
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+    if (this._hls) {
+      this._hls.destroy();
+      this._hls = null;
+    }
+    this._cleanupLivestream();
+    for (const url of Object.values(this._thumbCache || {})) {
+      if (typeof url === "string" && url.startsWith("blob:")) {
+        try { URL.revokeObjectURL(url); } catch {}
+      }
+    }
+    this._thumbCache = {};
+    if (this._onHashChange) {
+      window.removeEventListener("hashchange", this._onHashChange);
+      this._onHashChange = null;
+    }
+    if (this._onLocationChanged) {
+      window.removeEventListener("location-changed", this._onLocationChanged);
+      this._onLocationChanged = null;
+    }
+    this._clearAutoRefresh();
+    this._cleanupTimeline();
+  }
+
+  _parseClipHash() {
+    const hash = (window.location.hash || "").replace(/^#/, "");
+    if (!hash) return null;
+    for (const part of hash.split("&")) {
+      const [k, v] = part.split("=");
+      if (k === "clip" && v) return decodeURIComponent(v);
+    }
+    return null;
+  }
+
+  _checkHashForClip() {
+    const wantedId = this._parseClipHash();
+    if (!wantedId) {
+      this._pendingClipId = null;
+      return;
+    }
+    if (this._activeClip && this._activeClip._eventId === wantedId) return;
+    const events = this._events || [];
+    const match = events.find((ev) => ev._eventId === wantedId);
+    if (match) {
+      this._pendingClipId = null;
+      this._openClip(match);
+    } else {
+      this._pendingClipId = wantedId;
+    }
+  }
+
+  _isSplitLayout() {
+    const lay = this._config?.multiview
+      ? (this._config.multiview_layout || "auto")
+      : (this._config?.layout ?? "auto");
+    if (lay === "split") return true;
+    if (lay === "stacked") return false;
+    return this._cardWidth >= (this._config?.desktop_breakpoint || 800);
+  }
+
+  setConfig(config) {
+    if (!config) throw new Error("Invalid config");
+    const initial = Number(config.initial_events) || Number(config.clips_per_load) || 10;
+    this._config = {
+      title: config.title ?? "auto",
+      title_icon: config.title_icon || null,
+      cameras: FrigateLlmVisionTimelineCard._normalizeCamerasMap(config),
+      frigate_client_id: config.frigate_client_id ?? "frigate",
+      llm_vision: config.llm_vision !== false,
+      initial_events: initial,
+      events_per_load: Number(config.events_per_load) || Number(config.clips_per_load) || 10,
+      section_mode: config.section_mode === true,
+      height: config.height ?? config.max_height ?? "auto",
+      mobile_height: config.mobile_height ?? null,
+      desktop_height: config.desktop_height ?? null,
+      width: config.width ?? config.card_width ?? "auto",
+      layout: config.layout ?? "auto",
+      desktop_breakpoint: Number(config.desktop_breakpoint) || 800,
+      show_filters: config.show_filters !== false,
+      show_title: config.show_title !== false,
+      language: config.language ?? "auto",
+      label_colors:
+        config.label_colors && typeof config.label_colors === "object"
+          ? config.label_colors
+          : null,
+      label_icons:
+        config.label_icons && typeof config.label_icons === "object"
+          ? config.label_icons
+          : null,
+      label_style: ["soft", "solid", "outline"].includes(config.label_style)
+        ? config.label_style
+        : "soft",
+      prefer_mp4_cameras: Array.isArray(config.prefer_mp4_cameras)
+        ? config.prefer_mp4_cameras
+            .map((c) => String(c || "").trim().toLowerCase())
+            .filter(Boolean)
+        : [],
+      live_provider: VALID_LIVE_PROVIDERS.includes(config.live_provider)
+        ? config.live_provider
+        : "auto",
+      go2rtc_modes: sanitizeGo2rtcModes(config.go2rtc_modes) || DEFAULT_GO2RTC_MODES,
+      frigate_url: config.frigate_url ?? null,
+      go2rtc_url: config.go2rtc_url ?? null,
+      go2rtc_url_external: config.go2rtc_url_external ?? null,
+      live_camera: config.live_camera
+        ? String(config.live_camera).trim().toLowerCase()
+        : null,
+      auto_refresh_seconds: Math.max(0, Number(config.auto_refresh_seconds) || 0),
+      show_live_button: config.show_live_button !== false,
+      live_autostart: config.live_autostart !== false,
+      live_controls: config.live_controls !== false,
+      live_controls_position: ["top", "bottom"].includes(config.live_controls_position) ? config.live_controls_position : "bottom",
+      hd_sd_button: config.hd_sd_button !== false,
+      hd_sd_button_position: ["top", "bottom"].includes(config.hd_sd_button_position) ? config.hd_sd_button_position : "top",
+      multiview: config.multiview === true,
+      multiview_layout: ["split", "stacked", "auto"].includes(config.multiview_layout) ? config.multiview_layout : "auto",
+      multiview_columns: Math.max(1, Math.min(4, Number(config.multiview_columns) || 1)),
+      view_mode: ["events", "timeline"].includes(config.view_mode) ? config.view_mode : "events",
+      timeline_window_hours: Math.max(1, Math.min(168, Number(config.timeline_window_hours) || 24)),
+    };
+    // Timeline + Multiview schließen sich aus — Multiview hat Vorrang
+    if (this._config.multiview && this._config.view_mode === "timeline") {
+      this._config.view_mode = "events";
+    }
+    this._totalCap = this._config.initial_events;
+    if (this.isConnected) this._setupAutoRefresh();
+  }
+
+  static _normalizeCamerasMap(config) {
+    const map = {};
+    const put = (id) => {
+      const key = String(id).toLowerCase();
+      if (!map[key]) map[key] = { name: "", main: null, sub: null };
+      return map[key];
+    };
+
+    const c = config.cameras;
+    if (c && typeof c === "object" && !Array.isArray(c)) {
+      for (const [id, v] of Object.entries(c)) {
+        const entry = put(id);
+        const e = v && typeof v === "object" ? v : {};
+        if (e.name) entry.name = String(e.name);
+        if (e.main) entry.main = String(e.main);
+        if (e.sub) entry.sub = String(e.sub);
+      }
+    } else if (Array.isArray(c)) {
+      for (const item of c) {
+        if (typeof item === "string") { put(item); continue; }
+        if (item && typeof item === "object") {
+          const keys = Object.keys(item);
+          // supports both: {einfahrt: {main, sub, name}} OR {id: "einfahrt", main, sub, name}
+          if (item.id) {
+            const entry = put(item.id);
+            if (item.name) entry.name = String(item.name);
+            if (item.main) entry.main = String(item.main);
+            if (item.sub) entry.sub = String(item.sub);
+          } else if (keys.length === 1) {
+            const id = keys[0];
+            const val = item[id];
+            const entry = put(id);
+            if (val && typeof val === "object") {
+              if (val.name) entry.name = String(val.name);
+              if (val.main) entry.main = String(val.main);
+              if (val.sub) entry.sub = String(val.sub);
+            }
+          }
+        }
+      }
+    } else if (typeof c === "string" && c.toLowerCase() !== "all" && c.trim()) {
+      put(c);
+    }
+
+    return map;
+  }
+
+  get _t() {
+    const lang = detectLang(this.hass, this._config?.language);
+    return STRINGS[lang];
+  }
+
+  _camEntry(camName) {
+    if (!camName) return null;
+    return this._config?.cameras?.[String(camName).toLowerCase()] || null;
+  }
+
+  _camName(raw) {
+    if (!raw) return "";
+    const entry = this._camEntry(raw);
+    if (entry?.name) return entry.name;
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  }
+
+  _go2rtcStreamFor(camId, hd) {
+    const entry = this._camEntry(camId) || {};
+    if (hd && entry.main) return entry.main;
+    if (!hd && entry.sub) return entry.sub;
+    return entry.main || entry.sub || camId;
+  }
+
+  _configuredCameraIds() {
+    const keys = Object.keys(this._config?.cameras || {});
+    return keys;
+  }
+
+  getCardSize() {
+    return 8;
+  }
+
+  getGridOptions() {
+    return {
+      columns: 12,
+      rows: "auto",
+      min_columns: 6,
+      min_rows: 4,
+    };
+  }
+
+  getLayoutOptions() {
+    return {
+      grid_columns: 4,
+      grid_rows: "auto",
+      grid_min_columns: 2,
+      grid_min_rows: 3,
+    };
+  }
+
+  updated(changed) {
+    if (changed.has("hass") && this.hass && !this._hasFetchedOnce && !this._loading) {
+      this._hasFetchedOnce = true;
+      this._fetchAll();
+      if (this._config.view_mode !== "timeline"
+          && this._config.live_autostart
+          && !this._liveMode
+          && !this._liveAutostarted) {
+        this._liveAutostarted = true;
+        const preferred = this._resolveLiveCamera();
+        if (preferred) this._openLive(preferred);
+      }
+    }
+    if (changed.has("_clipUrl") && this._clipUrl) {
+      this.updateComplete.then(() => this._initPlayer());
+    }
+    if (this._config?.view_mode === "timeline") {
+      const desiredCam = this._resolveTimelineCamera();
+      // Initialise only when camera actually changes; avoids reinit-loop on HLS errors
+      if (desiredCam && desiredCam !== this._timelineCamera) {
+        this._initTimeline();
+      }
+    } else if (this._timelineHls) {
+      this._cleanupTimeline();
+    }
+  }
+
+  async _fetchAll() {
+    const token = ++this._fetchToken;
+    this._loading = true;
+    this._error = null;
+    try {
+      const [frigateEvents, llmEvents] = await Promise.all([
+        this._fetchFrigateEvents(),
+        this._config.llm_vision ? this._fetchLlmVisionEvents() : Promise.resolve([]),
+      ]);
+      if (token !== this._fetchToken) return;
+      this._llmEvents = llmEvents || [];
+      this._events = this._enrichEvents(frigateEvents);
+      this._checkHashForClip();
+    } catch (e) {
+      if (token === this._fetchToken) this._error = e.message || String(e);
+    } finally {
+      if (token === this._fetchToken) this._loading = false;
+    }
+  }
+
+  async _fetchFrigateEvents() {
+    const ws = (args) => this.hass.callWS(args);
+    const targetCams = this._getTargetCameras();
+
+    const root = await ws({
+      type: "media_source/browse_media",
+      media_content_id: "media-source://frigate",
+    });
+    if (!root.children?.length) throw new Error("Frigate Media Source leer.");
+    const instance = root.children[0];
+    const instanceRoot = await ws({
+      type: "media_source/browse_media",
+      media_content_id: instance.media_content_id,
+    });
+
+    const children = instanceRoot.children || [];
+    const findBy = (kw) =>
+      children.find((c) => (c.title || "").toLowerCase().includes(kw));
+    let eventsFolder =
+      findBy("clip") ||
+      findBy("recording") ||
+      findBy("review") ||
+      children.find((c) => {
+        const t = (c.title || "").toLowerCase();
+        return t.includes("event") && !t.includes("search");
+      });
+
+    let cameraFolders = eventsFolder ? [] : children;
+    if (eventsFolder) {
+      const content = await ws({
+        type: "media_source/browse_media",
+        media_content_id: eventsFolder.media_content_id,
+      });
+      cameraFolders = content.children || [];
+    }
+
+    const knownCameras = new Set(
+      Object.keys(this.hass?.states || {})
+        .filter((k) => k.startsWith("camera."))
+        .map((k) => k.substring("camera.".length))
+    );
+
+    const NON_CAMERA = new Set([
+      "today", "yesterday", "last 24 hours", "last 7 days", "last 30 days",
+      "all", "person", "people", "car", "dog", "cat", "bicycle", "motorcycle",
+      "package", "bird",
+    ]);
+
+    cameraFolders = cameraFolders.filter((f) => {
+      const name = (f.title || "").toLowerCase().replace(/\s*\(\d+\)$/, "");
+      if (!name) return false;
+      if (NON_CAMERA.has(name)) return false;
+      if (targetCams !== "all" && !targetCams.includes(name)) return false;
+      if (knownCameras.size > 0) {
+        for (const cam of knownCameras) {
+          if (cam === name || cam.includes(name) || name.includes(cam)) {
+            return true;
+          }
+        }
+        return false;
+      }
+      return true;
+    });
+
+    const discovered = cameraFolders
+      .map((f) => (f.title || "").toLowerCase().replace(/\s*\(\d+\)$/, ""))
+      .filter(Boolean);
+    this._availableCameras = Array.from(new Set(discovered)).sort();
+
+    let all = [];
+    for (const folder of cameraFolders) {
+      const camName = (folder.title || "").toLowerCase().replace(/\s*\(\d+\)$/, "");
+      if (targetCams !== "all" && !targetCams.includes(camName)) continue;
+
+      const perCamLimit = Math.max(this._totalCap * 3, 24);
+      const clips = [];
+      await this._walkCamera(folder, clips, perCamLimit);
+      clips.forEach((c) => {
+        c._camera = camName;
+        c._eventId = parseFrigateEventId(c.media_content_id);
+        const meta = parseClipMeta(c.title, c._eventId);
+        c._ts = meta.ts;
+        c._label = meta.label;
+      });
+      all = all.concat(clips);
+    }
+
+    all.sort((a, b) => {
+      const ta = a._ts ? a._ts.getTime() : 0;
+      const tb = b._ts ? b._ts.getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return (b.title || "").localeCompare(a.title || "");
+    });
+
+    const dedupeWindow =
+      Number(this._config?.dedupe_window_seconds ?? 30) * 1000;
+    const seenIds = new Set();
+    const seenBuckets = new Map();
+    const deduped = [];
+    for (const ev of all) {
+      const id = ev._eventId;
+      if (id && seenIds.has(id)) continue;
+
+      const tsMs = ev._ts ? ev._ts.getTime() : null;
+      const bucketKey = `${ev._camera}|${ev._label || ""}`;
+      if (tsMs != null && dedupeWindow > 0) {
+        const prevTs = seenBuckets.get(bucketKey);
+        if (prevTs != null && Math.abs(prevTs - tsMs) <= dedupeWindow) {
+          continue;
+        }
+        seenBuckets.set(bucketKey, tsMs);
+      } else {
+        const fk = `${bucketKey}|${ev.title}`;
+        if (seenBuckets.has(fk)) continue;
+        seenBuckets.set(fk, 0);
+      }
+
+      if (id) seenIds.add(id);
+      deduped.push(ev);
+    }
+
+    return deduped.slice(0, this._totalCap);
+  }
+
+  async _walkCamera(folder, collection, limit) {
+    const ws = (args) => this.hass.callWS(args);
+    const content = await ws({
+      type: "media_source/browse_media",
+      media_content_id: folder.media_content_id,
+    });
+    if (!content.children?.length) return;
+    const hasDateSubfolders = content.children[0].can_expand;
+    if (hasDateSubfolders) {
+      const sorted = content.children
+        .slice()
+        .sort((a, b) => (b.title || "").localeCompare(a.title || ""));
+      for (const dateFolder of sorted) {
+        if (collection.length >= limit) break;
+        const dateContent = await ws({
+          type: "media_source/browse_media",
+          media_content_id: dateFolder.media_content_id,
+        });
+        const sortedClips = (dateContent.children || [])
+          .slice()
+          .sort((a, b) => (b.title || "").localeCompare(a.title || ""));
+        for (const c of sortedClips) {
+          if (collection.length >= limit) break;
+          if (!c.can_expand) collection.push(c);
+        }
+      }
+    } else {
+      const sorted = content.children
+        .slice()
+        .sort((a, b) => (b.title || "").localeCompare(a.title || ""));
+      for (const c of sorted) {
+        if (collection.length >= limit) break;
+        if (!c.can_expand) collection.push(c);
+      }
+    }
+  }
+
+  async _fetchLlmVisionEvents() {
+    try {
+      const data = await this.hass.callApi(
+        "GET",
+        "llmvision/timeline/events?limit=200&days=7"
+      );
+      const items = Array.isArray(data?.events) ? data.events : [];
+      return items.map((i) => ({
+        title: i.title || "",
+        description: i.description || "",
+        label: i.label || "",
+        category: i.category || "",
+        cameraEntity: i.camera_name || "",
+        start: i.start ? new Date(i.start) : null,
+        uid: i.uid || "",
+      }));
+    } catch (e) {
+      console.warn("[FrigateLLMCard] LLM Vision fetch failed (ignored):", e);
+      return [];
+    }
+  }
+
+  _enrichEvents(frigateEvents) {
+    if (this._llmEvents?.length) {
+      const TOL = 90 * 1000;
+      for (const ev of frigateEvents) {
+        if (!ev._ts) continue;
+        const etime = ev._ts.getTime();
+        let best = null;
+        let bestDelta = Infinity;
+        for (const lv of this._llmEvents) {
+          if (!lv.start) continue;
+          const lvCam = lv.cameraEntity.toLowerCase();
+          if (
+            lvCam &&
+            !lvCam.includes(ev._camera) &&
+            !ev._camera.includes(lvCam.replace("camera.", ""))
+          )
+            continue;
+          const d = Math.abs(lv.start.getTime() - etime);
+          if (d < bestDelta && d <= TOL) {
+            best = lv;
+            bestDelta = d;
+          }
+        }
+        if (best) {
+          ev._llm = best;
+        }
+      }
+    }
+    return frigateEvents;
+  }
+
+  _snapshotUrl(ev) {
+    const id = ev._eventId;
+    const clientId = this._config.frigate_client_id;
+    if (id) {
+      return `/api/frigate/${clientId}/notifications/${id}/snapshot.jpg?bbox=1`;
+    }
+    return ev.thumbnail || null;
+  }
+
+  _authUrl(url) {
+    if (!url) return url;
+    const token = this.hass?.auth?.data?.access_token;
+    const alreadyAuthed = url.includes("authSig=");
+    const sep = url.includes("?") ? "&" : "?";
+    return token && !alreadyAuthed ? `${url}${sep}authSig=${token}` : url;
+  }
+
+  _directClipMp4Url(ev) {
+    const eventId = ev?._eventId || parseFrigateEventId(ev?.media_content_id);
+    if (!eventId) return null;
+    const clientId = this._config?.frigate_client_id;
+    return clientId
+      ? `/api/frigate/${clientId}/notifications/${eventId}/clip.mp4`
+      : `/api/frigate/notifications/${eventId}/clip.mp4`;
+  }
+
+  _boundedRecordingMp4Url(sourceUrl) {
+    if (!sourceUrl) return null;
+    try {
+      const u = new URL(sourceUrl, window.location.origin);
+      const match =
+        u.pathname.match(
+          /^\/api\/frigate\/([^/]+)\/vod\/(.+?)\/start\/([.0-9]+)\/end\/([.0-9]+)\/index\.m3u8$/i
+        ) ||
+        u.pathname.match(
+          /^\/api\/frigate\/vod\/(.+?)\/start\/([.0-9]+)\/end\/([.0-9]+)\/index\.m3u8$/i
+        );
+      if (!match) return null;
+
+      const startTs = parseFloat(match.length === 5 ? match[3] : match[2]);
+      const endTs = parseFloat(match.length === 5 ? match[4] : match[3]);
+      if (endTs - startTs > 120) {
+        console.info("[FrigateLLMCard] Bounded recording too long (%ss), skipping", Math.round(endTs - startTs));
+        return null;
+      }
+
+      if (match.length === 5) {
+        const [, instanceId, camera, start, end] = match;
+        return `/api/frigate/${instanceId}/recording/${camera}/start/${start}/end/${end}`;
+      }
+
+      const [, camera, start, end] = match;
+      return `/api/frigate/recording/${camera}/start/${start}/end/${end}`;
+    } catch {
+      return null;
+    }
+  }
+
+  _isMissingClipHlsError(details) {
+    return (
+      details === "manifestLoadError" ||
+      details === "manifestLoadTimeOut" ||
+      details === "manifestParsingError" ||
+      details === "levelLoadError" ||
+      details === "levelLoadTimeOut" ||
+      details === "fragLoadError" ||
+      details === "fragLoadTimeOut"
+    );
+  }
+
+  _setVideoSrcAndPlay(videoEl, url, tryPlay, onError) {
+    if (!videoEl || !url) return false;
+    if (onError) {
+      videoEl.addEventListener("error", onError, { once: true });
+    }
+    videoEl.src = url;
+    videoEl.addEventListener(
+      "loadedmetadata",
+      () => tryPlay(),
+      { once: true }
+    );
+    return true;
+  }
+
+  _describeMediaError(videoEl) {
+    const err = videoEl?.error;
+    if (!err) return "unknown error";
+    const codes = {
+      1: "MEDIA_ERR_ABORTED (load aborted)",
+      2: "MEDIA_ERR_NETWORK (network error)",
+      3: "MEDIA_ERR_DECODE (decode failed)",
+      4: "MEDIA_ERR_SRC_NOT_SUPPORTED (format/source unsupported)",
+    };
+    return `${codes[err.code] || `code ${err.code}`}${err.message ? ": " + err.message : ""}`;
+  }
+
+  _isMobileDevice() {
+    if (typeof navigator === "undefined") return false;
+    return (
+      navigator.maxTouchPoints > 1 ||
+      /iPhone|iPad|iPod|Android|Mobi/i.test(navigator.userAgent || "")
+    );
+  }
+
+  _isIOS() {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod/.test(ua)) return true;
+    return /Mac/.test(ua) && navigator.maxTouchPoints > 1;
+  }
+
+  _isSafariDesktop() {
+    if (typeof navigator === "undefined") return false;
+    const ua = navigator.userAgent || "";
+    if (!/Safari/i.test(ua)) return false;
+    if (/Chrome|Chromium|Firefox|Edg/i.test(ua)) return false;
+    return !this._isIOS();
+  }
+
+  async _prepareMp4DirectUrl(videoEl, candidates) {
+    if (!videoEl) throw new Error("No video element");
+    let lastError = null;
+    for (const sourceUrl of candidates) {
+      if (!sourceUrl) continue;
+      const playUrl = this._authUrl(sourceUrl);
+      console.info("[FrigateLLMCard] Probing MP4 candidate:", playUrl);
+      try {
+        await this._loadVideoSrcAwait(videoEl, playUrl);
+        console.info("[FrigateLLMCard] MP4 candidate OK:", sourceUrl);
+        return { playUrl, sourceUrl };
+      } catch (e) {
+        console.warn("[FrigateLLMCard] MP4 candidate failed:", sourceUrl, e?.message || e);
+        lastError = e;
+      }
+    }
+    throw lastError || new Error("No MP4 URL available");
+  }
+
+  _loadVideoSrcAwait(videoEl, url) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        videoEl.removeEventListener("loadedmetadata", onLoaded);
+        videoEl.removeEventListener("error", onError);
+      };
+      const onLoaded = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const onError = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(this._describeMediaError(videoEl)));
+      };
+      videoEl.addEventListener("loadedmetadata", onLoaded);
+      videoEl.addEventListener("error", onError);
+      videoEl.src = url;
+      try { videoEl.load(); } catch {}
+    });
+  }
+
+  _mp4FallbackCandidates(sourceUrl, ev) {
+    return [
+      this._directClipMp4Url(ev),
+      this._boundedRecordingMp4Url(sourceUrl),
+    ];
+  }
+
+  _rememberPreferMp4(ev, reason) {
+    const cam = ev?._camera;
+    if (!cam || this._preferMp4Cams.has(cam)) return;
+    this._preferMp4Cams.add(cam);
+    console.info("[FrigateLLMCard] Prefer MP4 for camera after HLS issue:", cam, reason);
+  }
+
+  _cameraShouldPreferMp4(cam) {
+    if (!cam) return false;
+    return (
+      this._preferMp4Cams.has(cam) ||
+      !!this._config?.prefer_mp4_cameras?.includes(cam)
+    );
+  }
+
+  async _startMp4FallbackPlayback(videoEl, candidates, tryPlay, onError, staleCheck, logPrefix, extraLog = []) {
+    const { sourceUrl } = await this._prepareMp4DirectUrl(videoEl, candidates);
+    if (staleCheck?.()) return true;
+    if (onError) {
+      videoEl.addEventListener("error", onError, { once: true });
+    }
+    tryPlay();
+    console.info(logPrefix, sourceUrl, ...extraLog);
+    return true;
+  }
+
+  _cleanupVideoEl(videoEl) {
+    if (!videoEl) return;
+    try { videoEl.pause(); } catch {}
+    try { videoEl.srcObject = null; } catch {}
+    videoEl.removeAttribute("src");
+    try { videoEl.load(); } catch {}
+  }
+
+  async _tryAutoplay(videoEl) {
+    try {
+      await videoEl.play();
+    } catch (e) {
+      if (e && (e.name === "NotAllowedError" || e.name === "AbortError")) {
+        console.info("[FrigateLLMCard] Autoplay with sound blocked – starting muted");
+        videoEl.muted = true;
+        try { await videoEl.play(); } catch {}
+      }
+    }
+  }
+
+  async _openClip(ev) {
+    if (this._activeClip && this._activeClip.media_content_id === ev.media_content_id) {
+      this._closeClip();
+      return;
+    }
+    if (this._liveMode) this._closeLive();
+    this._activeClip = ev;
+    this._clipUrl = null;
+    this._clipError = null;
+    try {
+      const result = await this.hass.callWS({
+        type: "media_source/resolve_media",
+        media_content_id: ev.media_content_id,
+      });
+      this._clipUrl = result.url;
+    } catch (e) {
+      this._clipError = `${this._t.clip_failed}: ${e.message || e}`;
+    }
+  }
+
+  _closeClip() {
+    this._cleanupVideoEl(this.renderRoot?.querySelector("video.player"));
+    if (this._hls) {
+      this._hls.destroy();
+      this._hls = null;
+    }
+    this._activeClip = null;
+    this._clipUrl = null;
+    this._clipError = null;
+  }
+
+  async _initPlayer() {
+    const videoEl = this.renderRoot?.querySelector("video.player");
+    if (!videoEl || !this._clipUrl) return;
+    if (this._hls) {
+      this._hls.destroy();
+      this._hls = null;
+    }
+    this._cleanupVideoEl(videoEl);
+    videoEl.muted = this._isMobileDevice();
+    videoEl.volume = 1.0;
+
+    const tryPlayWithFallback = () => this._tryAutoplay(videoEl);
+
+    const authUrl = this._authUrl(this._clipUrl);
+    const isHls = /\.m3u8($|\?)/i.test(this._clipUrl);
+    const activeClip = this._activeClip;
+    const mp4Candidates = this._mp4FallbackCandidates(this._clipUrl, activeClip);
+
+    if (activeClip?._camera && this._cameraShouldPreferMp4(activeClip._camera)) {
+      try {
+        const started = await this._startMp4FallbackPlayback(
+          videoEl,
+          mp4Candidates,
+          tryPlayWithFallback,
+          () => {
+            this._clipError = `${this._t.clip_failed} (Preferred MP4 decode failed)`;
+          },
+          () => this._activeClip !== activeClip,
+          "[FrigateLLMCard] Preferred MP4 fallback for camera:",
+          [activeClip._camera, activeClip?._eventId]
+        );
+        if (started) return;
+      } catch (e) {
+        console.warn("[FrigateLLMCard] Preferred MP4 preload failed, retrying HLS:", e);
+      }
+    }
+
+    if (isHls) {
+      try {
+        const Hls = await loadHls();
+        if (Hls && Hls.isSupported()) {
+          this._hls = new Hls({
+            maxBufferLength: 30,
+            maxMaxBufferLength: 30,
+            maxBufferSize: 60 * 1000 * 1000,
+            fragLoadPolicy: { default: { maxTimeToFirstByteMs: 8000, maxLoadTimeMs: 15000, timeoutRetry: { maxNumRetry: 1, retryDelayMs: 500 }, errorRetry: { maxNumRetry: 1, retryDelayMs: 500 } } },
+            manifestLoadPolicy: { default: { maxTimeToFirstByteMs: 8000, maxLoadTimeMs: 10000, timeoutRetry: { maxNumRetry: 1, retryDelayMs: 500 }, errorRetry: { maxNumRetry: 1, retryDelayMs: 500 } } },
+          });
+          this._hls.loadSource(authUrl);
+          this._hls.attachMedia(videoEl);
+          this._hls.on(Hls.Events.ERROR, (_e, data) => {
+            if (!data?.fatal) return;
+            const t = this._t;
+            if (this._isMissingClipHlsError(data.details)) {
+              this._clipError = t.clip_no_recording;
+              this._hls.destroy();
+              this._hls = null;
+              return;
+            }
+            this._hls.destroy();
+            this._hls = null;
+            this._rememberPreferMp4(activeClip, data.details);
+            (async () => {
+              try {
+                const started = await this._startMp4FallbackPlayback(
+                  videoEl,
+                  mp4Candidates,
+                  tryPlayWithFallback,
+                  () => {
+                    this._clipError = `${t.clip_failed} (HLS: ${data.details}, MP4 decode failed)`;
+                  },
+                  () => this._activeClip !== activeClip,
+                  "[FrigateLLMCard] HLS failed, using MP4 blob fallback:",
+                  [data.details, this._activeClip?._eventId]
+                );
+                if (started) {
+                  return;
+                }
+                this._clipError = `${t.clip_failed} (HLS: ${data.details}, MP4 fallback failed)`;
+              } catch (e) {
+                this._clipError = `${t.clip_failed} (HLS: ${data.details}, MP4: ${e?.message || e})`;
+              }
+            })();
+            return;
+          });
+          this._hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            tryPlayWithFallback();
+          });
+          return;
+        }
+      } catch (e) {
+        console.warn("[FrigateLLMCard] HLS load failed, fallback:", e);
+      }
+    }
+    this._setVideoSrcAndPlay(
+      videoEl,
+      authUrl,
+      tryPlayWithFallback,
+      () => {
+        const reason = this._describeMediaError(videoEl);
+        console.warn("[FrigateLLMCard] Native video playback failed:", reason);
+        this._clipError = `${this._t.clip_failed}: ${reason}`;
+        this.requestUpdate();
+      }
+    );
+  }
+
+  /* ───────── Livestream (delegates to LivestreamController) ───────── */
+
+  _ensureLivestreamController() {
+    if (this._lc) return this._lc;
+    this._lc = new LivestreamController({
+      logPrefix: "[FrigateLLMCard Live]",
+      failedMessage: this._t?.live_failed,
+      getConfig: () => this._config,
+      getVideoEl: () => this.renderRoot?.querySelector("video.player"),
+      getStreamName: (hd) => this._go2rtcStreamFor(this._liveCamera, hd),
+      onUpdate: () => this.updateComplete,
+      onState: (patch) => this._applyLiveState(patch),
+    });
+    return this._lc;
+  }
+
+  _applyLiveState(patch) {
+    if ("loading" in patch) this._liveLoading = !!patch.loading;
+    if ("provider" in patch) this._liveProvider = patch.provider ?? null;
+    if ("error" in patch) this._liveError = patch.error ?? null;
+    if ("mjpegUrl" in patch) this._mjpegSignedUrl = patch.mjpegUrl ?? null;
+    if ("mp4Url" in patch) this._mp4SignedUrl = patch.mp4Url ?? null;
+  }
+
+  _isExternal() { return !isLocalNetwork(); }
+
+  _resolveLiveCamera() {
+    const configured = this._configuredCameraIds();
+    const preferred = this._config?.live_camera;
+    if (preferred && configured.includes(preferred)) return preferred;
+    if (preferred && this._availableCameras?.includes(preferred)) return preferred;
+    return configured[0] || this._availableCameras?.[0] || null;
+  }
+
+  _openLive(cameraId) {
+    const cam = cameraId || this._resolveLiveCamera();
+    if (!cam) {
+      this._liveError = this._t.live_no_camera;
+      return;
+    }
+    this._closeClip();
+    this._liveMode = true;
+    this._liveCamera = cam;
+    this._liveError = null;
+    this._liveLoading = true;
+    this._liveProvider = null;
+    this._isHD = false;
+    const lc = this._ensureLivestreamController();
+    lc.cleanup();
+    lc._isHD = false;
+    this.updateComplete.then(() => lc.start(cam));
+  }
+
+  _closeLive() {
+    this._lc?.cleanup();
+    this._liveMode = false;
+    this._liveCamera = null;
+    this._liveError = null;
+    this._liveLoading = false;
+    this._liveProvider = null;
+    this._mjpegSignedUrl = null;
+    this._mp4SignedUrl = null;
+    this._isHD = false;
+  }
+
+  _onMjpegError() {
+    console.warn("[FrigateLLMCard] MJPEG <img> error — URL:", this._mjpegSignedUrl);
+    this._liveError = `${this._t.live_failed} (MJPEG)`;
+  }
+
+  _toggleHD() {
+    if (!this._liveCamera || !this._lc) return;
+    this._lc.toggleHD();
+    this._isHD = this._lc.isHD;
+  }
+
+  _switchLiveCamera(cameraName) {
+    if (cameraName === this._liveCamera) return;
+    this._liveCamera = cameraName;
+    this._isHD = false;
+    this._liveLoading = true;
+    this._liveError = null;
+    this._liveProvider = null;
+    this._ensureLivestreamController().switchCamera(cameraName);
+  }
+
+  _cleanupLivestream() {
+    this._lc?.cleanup();
+  }
+
+  /* ───────── Timeline (VoD recording with event markers) ───────── */
+
+  _resolveTimelineCamera() {
+    if (this._activeCameras && this._activeCameras.size > 0) {
+      const first = Array.from(this._activeCameras)[0];
+      if (first) return first;
+    }
+    return this._configuredCameraIds()[0] || this._availableCameras?.[0] || null;
+  }
+
+  _timelineWindowMs() {
+    return (this._config?.timeline_window_hours || 24) * 3600 * 1000;
+  }
+
+  _computeTimelineRange() {
+    const end = Date.now();
+    const start = end - this._timelineWindowMs();
+    this._timelineRangeStart = start;
+    this._timelineRangeEnd = end;
+    if (!this._timelineZoomCenter) this._timelineZoomCenter = end;
+    return { start, end };
+  }
+
+  _timelineZoomLevels() {
+    return [1, 2, 4, 8, 16, 24];
+  }
+
+  _timelineVisibleRange() {
+    const totalSpan = this._timelineRangeEnd - this._timelineRangeStart;
+    const visibleSpan = totalSpan / (this._timelineZoomLevel || 1);
+    let center = this._timelineZoomCenter || this._timelineRangeEnd;
+    let start = center - visibleSpan / 2;
+    let end = center + visibleSpan / 2;
+    if (end > this._timelineRangeEnd) {
+      end = this._timelineRangeEnd;
+      start = end - visibleSpan;
+    }
+    if (start < this._timelineRangeStart) {
+      start = this._timelineRangeStart;
+      end = Math.min(this._timelineRangeEnd, start + visibleSpan);
+    }
+    return { start, end };
+  }
+
+  _zoomTimelineStep(direction, anchorMs = null) {
+    const levels = this._timelineZoomLevels();
+    const idx = levels.indexOf(this._timelineZoomLevel || 1);
+    const nextIdx = direction > 0
+      ? Math.min(levels.length - 1, idx + 1)
+      : Math.max(0, idx - 1);
+    if (nextIdx === idx) return;
+    if (anchorMs != null) this._timelineZoomCenter = anchorMs;
+    this._timelineZoomLevel = levels[nextIdx];
+  }
+
+  _resetTimelineZoom() {
+    this._timelineZoomLevel = 1;
+    this._timelineZoomCenter = this._timelineRangeEnd;
+  }
+
+  _onTimelineWheel(e) {
+    e.preventDefault();
+    const target = e.currentTarget;
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const isVertical = target.classList.contains("timeline-vertical");
+    const ratio = isVertical
+      ? (e.clientY - rect.top) / rect.height
+      : (e.clientX - rect.left) / rect.width;
+    const visible = this._timelineVisibleRange();
+    const anchorMs = visible.start + Math.max(0, Math.min(1, ratio)) * (visible.end - visible.start);
+    this._zoomTimelineStep(e.deltaY < 0 ? 1 : -1, anchorMs);
+  }
+
+  _onTimelinePointerDown(e) {
+    if (e.button != null && e.button !== 0) return;
+    const target = e.currentTarget;
+    if (!target) return;
+    const visible = this._timelineVisibleRange();
+    this._timelineDragInfo = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      isVertical: target.classList.contains("timeline-vertical"),
+      rect: target.getBoundingClientRect(),
+      initialCenter: this._timelineZoomCenter || this._timelineRangeEnd,
+      visibleSpan: visible.end - visible.start,
+      moved: false,
+      target,
+    };
+    try { target.setPointerCapture(e.pointerId); } catch {}
+  }
+
+  _onTimelinePointerMove(e) {
+    const info = this._timelineDragInfo;
+    if (!info || e.pointerId !== info.pointerId) return;
+    const deltaPx = info.isVertical
+      ? e.clientY - info.startY
+      : e.clientX - info.startX;
+    if (!info.moved && Math.abs(deltaPx) > 5) {
+      info.moved = true;
+      info.target.classList.add("timeline-track--dragging");
+      // Switch back to VoD on drag start if a clip was playing
+      if (this._activeClip) this._closeClip();
+    }
+    if (!info.moved) return;
+    const trackSize = info.isVertical ? info.rect.height : info.rect.width;
+    if (!trackSize) return;
+    const deltaMs = (deltaPx / trackSize) * info.visibleSpan;
+    const halfSpan = info.visibleSpan / 2;
+    const minCenter = this._timelineRangeStart + halfSpan;
+    const maxCenter = this._timelineRangeEnd - halfSpan;
+    let newCenter = info.initialCenter - deltaMs;
+    if (minCenter <= maxCenter) {
+      newCenter = Math.max(minCenter, Math.min(maxCenter, newCenter));
+    }
+    this._timelineZoomCenter = newCenter;
+  }
+
+  _onTimelinePointerUp(e) {
+    const info = this._timelineDragInfo;
+    if (!info || e.pointerId !== info.pointerId) return;
+    try { info.target.releasePointerCapture(e.pointerId); } catch {}
+    info.target.classList.remove("timeline-track--dragging");
+    this._timelineDragInfo = null;
+    if (!info.moved) {
+      this._seekTimelineFromClick(e);
+    }
+  }
+
+  _onTimelinePointerCancel(e) {
+    const info = this._timelineDragInfo;
+    if (!info || e.pointerId !== info.pointerId) return;
+    try { info.target.releasePointerCapture(e.pointerId); } catch {}
+    info.target.classList.remove("timeline-track--dragging");
+    this._timelineDragInfo = null;
+  }
+
+  _hourStartMs(timestampMs) {
+    return timestampMs - (timestampMs % 3600000);
+  }
+
+  _timelineHourVodUrl(camera, hourStartMs) {
+    if (!camera) return null;
+    // Frigate 0.17 hour-based VoD: /vod/<YYYY-MM>/<DD>/<HH>/<camera>/index.m3u8
+    // Empirically: the endpoint interprets the path components as LOCAL time
+    // (matches Frigate's storage layout for the user's tz, despite the docs
+    // suggesting UTC). Use local date parts.
+    const d = new Date(hourStartMs);
+    const pad = (n) => String(n).padStart(2, "0");
+    const yyyymm = `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+    const dd = pad(d.getDate());
+    const hh = pad(d.getHours());
+    const clientId = this._config?.frigate_client_id;
+    const base = clientId ? `/api/frigate/${clientId}` : `/api/frigate`;
+    return `${base}/vod/${yyyymm}/${dd}/${hh}/${camera}/index.m3u8`;
+  }
+
+  _timelineEvents() {
+    if (!this._events) return [];
+    const cam = this._timelineCamera;
+    if (!cam) return [];
+    const start = this._timelineRangeStart;
+    const end = this._timelineRangeEnd;
+    let list = this._events.filter((ev) => {
+      if (ev._camera !== cam) return false;
+      if (!ev._ts) return false;
+      const t = ev._ts.getTime();
+      return t >= start && t <= end;
+    });
+    if (this._activeLabels && this._activeLabels.size > 0) {
+      list = list.filter((ev) => {
+        const lbl = (ev._llm?.label || ev._label || "").toLowerCase();
+        return lbl && this._activeLabels.has(lbl);
+      });
+    }
+    return list;
+  }
+
+  async _initTimeline() {
+    if (this._config?.view_mode !== "timeline") return;
+    this._closeClip();
+    if (this._liveMode) this._closeLive();
+    const cam = this._resolveTimelineCamera();
+    if (!cam) {
+      this._timelineError = this._t.timeline_no_camera;
+      this._timelineCamera = null;
+      return;
+    }
+    const camChanged = this._timelineCamera !== cam;
+    this._timelineCamera = cam;
+    this._computeTimelineRange();
+    if (!camChanged && this._timelineHls) return;
+    this._cleanupTimeline();
+    // Default load: the current hour, seek towards live edge.
+    const hour = this._hourStartMs(Date.now());
+    await this._loadTimelineHour(hour, null);
+  }
+
+  async _loadTimelineHour(hourStartMs, seekTimestampMs) {
+    const cam = this._timelineCamera;
+    if (!cam) return;
+    if (this._timelineHourStart === hourStartMs && this._timelineHls) {
+      // Already on this hour — just seek
+      if (seekTimestampMs != null) this._seekWithinCurrentHour(seekTimestampMs);
+      return;
+    }
+    this._cleanupTimeline();
+    this._timelineHourStart = hourStartMs;
+    this._timelinePendingSeekSec = seekTimestampMs != null
+      ? Math.max(0, (seekTimestampMs - hourStartMs) / 1000)
+      : null;
+    this._timelineLoading = true;
+    this._timelineError = null;
+    this._timelinePlayerTime = 0;
+    await this.updateComplete;
+    await this._initTimelinePlayer();
+  }
+
+  async _signPath(path) {
+    try {
+      const result = await this.hass.callWS({
+        type: "auth/sign_path",
+        path,
+        expires: 3600,
+      });
+      // Convert to absolute URL so blob:-based manifests resolve correctly
+      return new URL(result?.path || path, location.origin).toString();
+    } catch (e) {
+      console.warn("[FrigateLLMCard] sign_path failed:", path, e);
+      return new URL(path, location.origin).toString();
+    }
+  }
+
+  async _fetchSignedManifest(manifestPath) {
+    const token = this.hass?.auth?.data?.access_token;
+    const resp = await fetch(manifestPath, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) {
+      const err = new Error(`Manifest fetch failed: ${resp.status}`);
+      err.status = resp.status;
+      throw err;
+    }
+    const text = await resp.text();
+    const basePath = manifestPath.substring(0, manifestPath.lastIndexOf("/"));
+    const lines = text.split("\n");
+    const tasks = lines.map((line) => {
+      const trimmed = line.trim();
+      const mapMatch = trimmed.match(/^#EXT-X-MAP:URI="([^"]+)"/);
+      if (mapMatch) {
+        const sub = `${basePath}/${mapMatch[1]}`;
+        return this._signPath(sub).then((signed) => line.replace(mapMatch[1], signed));
+      }
+      if (trimmed && !trimmed.startsWith("#")) {
+        const sub = `${basePath}/${trimmed}`;
+        return this._signPath(sub);
+      }
+      return Promise.resolve(line);
+    });
+    const rewritten = await Promise.all(tasks);
+    const blob = new Blob([rewritten.join("\n")], {
+      type: "application/vnd.apple.mpegurl",
+    });
+    if (this._timelineBlobUrl) {
+      try { URL.revokeObjectURL(this._timelineBlobUrl); } catch {}
+    }
+    this._timelineBlobUrl = URL.createObjectURL(blob);
+    return this._timelineBlobUrl;
+  }
+
+  async _initTimelinePlayer() {
+    const videoEl = this.renderRoot?.querySelector("video.timeline-player");
+    if (!videoEl) return;
+    const cam = this._timelineCamera;
+    if (!cam) return;
+    const manifestPath = this._timelineHourVodUrl(cam, this._timelineHourStart);
+    if (!manifestPath) {
+      this._timelineError = this._t.timeline_failed;
+      this._timelineLoading = false;
+      return;
+    }
+    this._timelineManifestPath = manifestPath;
+    this._timelineCurrentSegment = null;
+
+    videoEl.removeEventListener("timeupdate", this._onTimelineTick);
+    this._onTimelineTick = () => {
+      this._timelinePlayerTime = videoEl.currentTime || 0;
+    };
+    videoEl.addEventListener("timeupdate", this._onTimelineTick);
+
+    // Diagnostic listeners (logged once per load to avoid spam)
+    if (this._timelineDiagListeners) {
+      this._timelineDiagListeners.forEach(({ evt, fn }) =>
+        videoEl.removeEventListener(evt, fn)
+      );
+    }
+    const diag = (evt) => () =>
+      console.info(`[FrigateLLMCard] video.${evt}`, "currentTime=", videoEl.currentTime, "paused=", videoEl.paused);
+    this._timelineDiagListeners = ["seeked", "waiting", "stalled", "playing", "pause"].map((evt) => ({
+      evt,
+      fn: diag(evt),
+    }));
+    this._timelineDiagListeners.forEach(({ evt, fn }) => videoEl.addEventListener(evt, fn));
+
+    let seekAttempted = false;
+    const seekEvents = ["loadedmetadata", "loadeddata", "durationchange", "canplay"];
+    const attemptInitialSeek = () => {
+      if (seekAttempted) return;
+      const dur = videoEl.duration;
+      if (!dur || !isFinite(dur)) return;
+      seekAttempted = true;
+      this._timelineLoading = false;
+      console.info("[FrigateLLMCard] Timeline loaded, duration:", dur, "pendingSeekSec:", this._timelinePendingSeekSec);
+      if (dur > 3700) {
+        console.warn("[FrigateLLMCard] Manifest duration > 1h:", dur, "— Frigate may have stitched extra recordings");
+      }
+      try {
+        if (this._timelinePendingSeekSec != null) {
+          const target = Math.max(0, Math.min(dur - 0.5, this._timelinePendingSeekSec));
+          videoEl.currentTime = target;
+          this._timelinePendingSeekSec = null;
+          videoEl.play().catch(() => {});
+        } else {
+          videoEl.currentTime = Math.max(0, dur - 1);
+        }
+      } catch (e) {
+        console.warn("[FrigateLLMCard] Initial seek failed:", e);
+      }
+      // Detach to avoid leaks — successful seek done
+      seekEvents.forEach((evt) => videoEl.removeEventListener(evt, attemptInitialSeek));
+      this._timelineSeekHandler = null;
+    };
+    // Detach any handler from a previous load
+    if (this._timelineSeekHandler && this._timelineSeekEvents) {
+      this._timelineSeekEvents.forEach((evt) => videoEl.removeEventListener(evt, this._timelineSeekHandler));
+    }
+    this._timelineSeekHandler = attemptInitialSeek;
+    this._timelineSeekEvents = seekEvents;
+    seekEvents.forEach((evt) => videoEl.addEventListener(evt, attemptInitialSeek));
+
+    let blobUrl;
+    try {
+      blobUrl = await this._fetchSignedManifest(manifestPath);
+    } catch (e) {
+      console.warn("[FrigateLLMCard] Timeline manifest fetch failed:", e);
+      this._timelineError = e.status === 404
+        ? this._t.timeline_no_recording
+        : `${this._t.timeline_failed}: ${e.message}`;
+      this._timelineLoading = false;
+      return;
+    }
+
+    try {
+      const Hls = await loadHls();
+      if (Hls && Hls.isSupported()) {
+        this._timelineHls = new Hls({
+          maxBufferLength: 60,
+          maxMaxBufferLength: 120,
+          fragLoadPolicy: {
+            default: {
+              maxTimeToFirstByteMs: 8000,
+              maxLoadTimeMs: 15000,
+              timeoutRetry: { maxNumRetry: 1, retryDelayMs: 500 },
+              errorRetry: { maxNumRetry: 0 },
+            },
+          },
+          manifestLoadPolicy: {
+            default: {
+              maxTimeToFirstByteMs: 8000,
+              maxLoadTimeMs: 10000,
+              timeoutRetry: { maxNumRetry: 0 },
+              errorRetry: { maxNumRetry: 0 },
+            },
+          },
+        });
+        this._timelineHls.loadSource(blobUrl);
+        this._timelineHls.attachMedia(videoEl);
+        this._timelineHls.on(Hls.Events.ERROR, (_e, data) => {
+          if (!data?.fatal) return;
+          console.warn("[FrigateLLMCard] Timeline HLS error:", data.details, data.response);
+          this._timelineHls?.destroy();
+          this._timelineHls = null;
+          this._timelineError = `${this._t.timeline_failed}: ${data.details}`;
+          this._timelineLoading = false;
+        });
+        this._timelineHls.on(Hls.Events.FRAG_CHANGED, (_e, data) => {
+          const u = data?.frag?.url;
+          if (!u) return;
+          this._timelineCurrentSegment = u.split("?")[0].split("/").pop();
+        });
+        return;
+      }
+    } catch (e) {
+      console.warn("[FrigateLLMCard] Timeline HLS load failed:", e);
+    }
+    // Native fallback (Safari/iOS): blob URL plays natively too
+    videoEl.src = blobUrl;
+    videoEl.addEventListener(
+      "error",
+      () => {
+        this._timelineError = `${this._t.timeline_failed}: ${this._describeMediaError(videoEl)}`;
+        this._timelineLoading = false;
+      },
+      { once: true }
+    );
+  }
+
+  _seekWithinCurrentHour(timestampMs) {
+    const videoEl = this.renderRoot?.querySelector("video.timeline-player");
+    if (!videoEl) return;
+    const offsetSec = Math.max(0, (timestampMs - this._timelineHourStart) / 1000);
+    const dur = videoEl.duration && isFinite(videoEl.duration) ? videoEl.duration : 3600;
+    const target = Math.max(0, Math.min(dur - 0.5, offsetSec));
+    console.info(
+      "[FrigateLLMCard] Seek within hour:",
+      "ts=", new Date(timestampMs).toISOString(),
+      "hourStart=", new Date(this._timelineHourStart).toISOString(),
+      "offsetSec=", offsetSec,
+      "duration=", dur,
+      "→ currentTime=", target
+    );
+    try {
+      videoEl.currentTime = target;
+      videoEl.play().catch(() => {});
+    } catch (e) {
+      console.warn("[FrigateLLMCard] Seek failed:", e);
+    }
+  }
+
+  _seekTimelineTo(timestampMs) {
+    // Auto-pan zoom window if the target is currently outside the visible range
+    const visible = this._timelineVisibleRange();
+    if (timestampMs < visible.start || timestampMs > visible.end) {
+      this._timelineZoomCenter = timestampMs;
+    }
+    const targetHour = this._hourStartMs(timestampMs);
+    if (targetHour !== this._timelineHourStart) {
+      this._loadTimelineHour(targetHour, timestampMs);
+      return;
+    }
+    this._seekWithinCurrentHour(timestampMs);
+  }
+
+  _seekTimelineFromClick(e) {
+    const target = e.currentTarget;
+    if (!target) return;
+    // Switch back to VoD if a single clip was active
+    if (this._activeClip) this._closeClip();
+    const rect = target.getBoundingClientRect();
+    const isVertical = target.classList.contains("timeline-vertical");
+    const ratio = isVertical
+      ? (e.clientY - rect.top) / rect.height
+      : (e.clientX - rect.left) / rect.width;
+    const clamped = Math.max(0, Math.min(1, ratio));
+    const visible = this._timelineVisibleRange();
+    const ts = visible.start + clamped * (visible.end - visible.start);
+    this._seekTimelineTo(ts);
+  }
+
+  _cleanupTimeline() {
+    if (this._timelineHls) {
+      try { this._timelineHls.destroy(); } catch {}
+      this._timelineHls = null;
+    }
+    if (this._timelineBlobUrl) {
+      try { URL.revokeObjectURL(this._timelineBlobUrl); } catch {}
+      this._timelineBlobUrl = null;
+    }
+    const videoEl = this.renderRoot?.querySelector("video.timeline-player");
+    if (videoEl) {
+      if (this._onTimelineTick) {
+        videoEl.removeEventListener("timeupdate", this._onTimelineTick);
+      }
+      if (this._timelineSeekHandler && this._timelineSeekEvents) {
+        this._timelineSeekEvents.forEach((evt) =>
+          videoEl.removeEventListener(evt, this._timelineSeekHandler)
+        );
+      }
+      try { videoEl.pause(); } catch {}
+      videoEl.removeAttribute("src");
+      try { videoEl.load(); } catch {}
+    }
+    if (this._timelineDiagListeners && videoEl) {
+      this._timelineDiagListeners.forEach(({ evt, fn }) =>
+        videoEl.removeEventListener(evt, fn)
+      );
+    }
+    this._timelineDiagListeners = null;
+    this._onTimelineTick = null;
+    this._timelineSeekHandler = null;
+    this._timelineSeekEvents = null;
+    this._timelinePlayerTime = 0;
+    this._timelineCurrentSegment = null;
+    this._timelineManifestPath = null;
+  }
+
+  _getTargetCameras() {
+    const keys = Object.keys(this._config?.cameras || {});
+    return keys.length ? keys : "all";
+  }
+
+  _loadMore() {
+    this._totalCap = (this._totalCap || this._config.initial_events) +
+      this._config.events_per_load;
+    this._fetchAll();
+  }
+
+  _loadLess() {
+    const min = this._config.initial_events || 10;
+    const step = this._config.events_per_load || 10;
+    this._totalCap = Math.max(min, (this._totalCap || min) - step);
+    this._fetchAll();
+  }
+
+  _availableLabels() {
+    const set = new Set();
+    for (const ev of this._events || []) {
+      const lbl = (ev._llm?.label || ev._label || "").toLowerCase();
+      if (lbl) set.add(lbl);
+    }
+    return Array.from(set).sort();
+  }
+
+  _filteredEvents() {
+    if (!this._events) return [];
+    let list = this._events;
+
+    if (this._activeCameras && this._activeCameras.size > 0) {
+      list = list.filter((ev) => this._activeCameras.has(ev._camera));
+    }
+
+    if (this._activeLabels && this._activeLabels.size > 0) {
+      list = list.filter((ev) => {
+        const lbl = (ev._llm?.label || ev._label || "").toLowerCase();
+        return lbl && this._activeLabels.has(lbl);
+      });
+    }
+
+    if (this._dateFilter && this._dateFilter !== "all") {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      list = list.filter((ev) => {
+        if (!ev._ts) return false;
+        const d = new Date(
+          ev._ts.getFullYear(),
+          ev._ts.getMonth(),
+          ev._ts.getDate()
+        );
+        const diffDays = Math.round((today - d) / 86400000);
+        if (this._dateFilter === "today") return diffDays === 0;
+        if (this._dateFilter === "yesterday") return diffDays === 1;
+        if (this._dateFilter === "week") return diffDays >= 0 && diffDays <= 7;
+        return true;
+      });
+    }
+    return list;
+  }
+
+  _toggleLabel(label) {
+    const next = new Set(this._activeLabels || []);
+    if (next.has(label)) next.delete(label);
+    else next.add(label);
+    this._activeLabels = next.size === 0 ? null : next;
+  }
+
+  _toggleCamera(cam) {
+    const next = new Set(this._activeCameras || []);
+    if (next.has(cam)) next.delete(cam);
+    else next.add(cam);
+    this._activeCameras = next.size === 0 ? null : next;
+  }
+
+  _setDateFilter(val) {
+    this._dateFilter = val;
+    this._showDateMenu = false;
+  }
+
+  _toggleLabelMenu() {
+    this._showLabelMenu = !this._showLabelMenu;
+    if (this._showLabelMenu) {
+      this._showDateMenu = false;
+      this._showCameraMenu = false;
+      this._showLiveCamMenu = false;
+    }
+  }
+
+  _toggleDateMenu() {
+    this._showDateMenu = !this._showDateMenu;
+    if (this._showDateMenu) {
+      this._showLabelMenu = false;
+      this._showCameraMenu = false;
+      this._showLiveCamMenu = false;
+    }
+  }
+
+  _toggleCameraMenu() {
+    this._showCameraMenu = !this._showCameraMenu;
+    if (this._showCameraMenu) {
+      this._showLabelMenu = false;
+      this._showDateMenu = false;
+      this._showLiveCamMenu = false;
+    }
+  }
+
+  _refresh() {
+    this._totalCap = this._config.initial_events;
+    this._fetchAll();
+    // Restart single live stream
+    if (this._liveMode && this._liveCamera) {
+      this._liveLoading = true;
+      this._liveProvider = null;
+      this._liveError = null;
+      this._ensureLivestreamController().restart();
+    }
+    // Restart timeline (recompute range to "now")
+    if (this._config.view_mode === "timeline" && this._timelineCamera) {
+      this._cleanupTimeline();
+      this.updateComplete.then(() => this._initTimeline());
+    }
+    // Restart all multiview tiles
+    if (this._config.multiview) {
+      this.updateComplete.then(() => {
+        const tiles = this.renderRoot?.querySelectorAll("frigate-llm-live-tile");
+        if (tiles) tiles.forEach((tile) => tile._restart());
+      });
+    }
+  }
+
+  _openLightbox(ev, snapUrl) {
+    this._lightbox = { ev, url: snapUrl };
+  }
+
+  _closeLightbox() {
+    this._lightbox = null;
+  }
+
+  render() {
+    if (!this._config) return html``;
+    const t = this._t;
+    const displayTitle =
+      !this._config.title || this._config.title === "auto"
+        ? t.title
+        : this._config.title;
+
+    const filtered = this._filteredEvents();
+
+    let mergedCardStyle = "";
+    if (this._config.section_mode) {
+      mergedCardStyle = "height: 100%; width: 100%;";
+    } else {
+      const toCss = (v) =>
+        v === "full" ? "100%" : typeof v === "number" ? `${v}px` : v;
+      const bp = this._config.desktop_breakpoint || 800;
+      const isDesktop = this._cardWidth >= bp;
+      const h =
+        (isDesktop ? this._config.desktop_height : this._config.mobile_height)
+        ?? this._config.height;
+      if (h && h !== "auto") {
+        mergedCardStyle += `height: ${toCss(h)};`;
+      }
+      const w = this._config.width;
+      if (w && w !== "auto") {
+        if (w === "full") {
+          mergedCardStyle += "width: 100%;";
+        } else {
+          mergedCardStyle += `max-width: ${toCss(w)}; width: 100%; margin: 0 auto;`;
+        }
+      }
+    }
+
+    const isSplit = this._isSplitLayout();
+    const splitClass = `split ${isSplit ? "is-split" : "is-stacked"}`;
+
+    return html`
+      <ha-card style=${mergedCardStyle}>
+        <div class="header">
+          ${this._config.show_title
+            ? html`<div class="title">
+                ${this._config.title_icon ? html`<ha-icon icon="${this._config.title_icon}" style="margin-right:6px;--mdc-icon-size:20px;"></ha-icon>` : ""}
+                ${displayTitle}
+              </div>`
+            : ""}
+          ${isSplit && this._config.show_filters
+            ? this._renderFilters()
+            : html`<div class="spacer"></div>`}
+          <button class="iconbtn" title="${t.refresh}" @click=${() => this._refresh()}>
+            <ha-icon icon="mdi:refresh"></ha-icon>
+          </button>
+        </div>
+
+        <div class="${splitClass}">
+          <div class="left">${this._renderLeftPanel()}</div>
+          <div class="right">
+            ${!isSplit && this._config.show_filters
+              ? this._renderFilters()
+              : ""}
+            ${this._error ? html`<div class="error">${this._error}</div>` : ""}
+            ${this._config.view_mode === "timeline"
+              ? this._renderTimeline(isSplit)
+              : html`<div class="list-wrap">
+                  <div class="list">${this._renderEventList(filtered)}</div>
+                </div>`}
+          </div>
+        </div>
+
+        ${this._renderLightbox()}
+      </ha-card>
+    `;
+  }
+
+  _renderLeftPanel() {
+    if (this._config.view_mode === "timeline") {
+      // Marker click loads the single clip; track scrubbing keeps VoD recording
+      if (this._activeClip) return this._renderPlayer();
+      return this._renderTimelinePlayer();
+    }
+    if (this._config.multiview) return this._renderMultiview();
+    return this._renderPlayer();
+  }
+
+  _renderTimelinePlayer() {
+    const t = this._t;
+    const cam = this._timelineCamera || this._resolveTimelineCamera();
+    if (!cam) {
+      return html`
+        <div class="player-placeholder">
+          <ha-icon icon="mdi:filmstrip-off"></ha-icon>
+          <div>${t.timeline_no_camera}</div>
+        </div>
+      `;
+    }
+    let wallClock = null;
+    if (this._timelineHourStart) {
+      const absMs = this._timelineHourStart + (this._timelinePlayerTime || 0) * 1000;
+      const d = new Date(absMs);
+      const pad = (n) => String(n).padStart(2, "0");
+      wallClock = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(Math.floor(d.getSeconds()))}`;
+    }
+    return html`
+      <div class="player-wrap timeline-player-wrap">
+        ${this._timelineLoading ? html`<div class="loading">${t.timeline_loading}</div>` : ""}
+        ${this._timelineError ? html`<div class="error">${this._timelineError}</div>` : ""}
+        <video class="timeline-player" playsinline controls preload="metadata"></video>
+        <div class="timeline-cam-badge">
+          <ha-icon icon="mdi:cctv"></ha-icon>
+          <span>${this._camName(cam)}</span>
+          ${wallClock ? html`<span class="timeline-wallclock">${wallClock}</span>` : ""}
+        </div>
+      </div>
+      ${this._timelineManifestPath || this._timelineCurrentSegment
+        ? html`
+            <div class="timeline-debug">
+              ${this._timelineManifestPath
+                ? html`<div class="timeline-debug-row">
+                    <span class="timeline-debug-key">Manifest:</span>
+                    <span class="timeline-debug-val" title=${this._timelineManifestPath}>${this._timelineManifestPath}</span>
+                  </div>`
+                : ""}
+              ${this._timelineCurrentSegment
+                ? html`<div class="timeline-debug-row">
+                    <span class="timeline-debug-key">Segment:</span>
+                    <span class="timeline-debug-val">${this._timelineCurrentSegment}</span>
+                  </div>`
+                : ""}
+            </div>
+          `
+        : ""}
+    `;
+  }
+
+  _renderTimeline(isSplit) {
+    const t = this._t;
+    const cam = this._timelineCamera;
+    const events = this._timelineEvents();
+    const lang = detectLang(this.hass, this._config?.language);
+    const orientation = isSplit ? "vertical" : "horizontal";
+    const visible = this._timelineVisibleRange();
+    const start = visible.start;
+    const end = visible.end;
+    const span = end - start;
+    const ticks = this._buildTimelineTicks(start, end, isSplit);
+
+    const visibleEvents = events.filter((ev) => {
+      if (!ev._ts) return false;
+      const ts = ev._ts.getTime();
+      return ts >= start && ts <= end;
+    });
+
+    let indicatorPos = null;
+    if (this._timelineHourStart) {
+      const cappedSec = Math.min(this._timelinePlayerTime || 0, 3600);
+      const absTimeMs = this._timelineHourStart + cappedSec * 1000;
+      if (absTimeMs >= start && absTimeMs <= end) {
+        indicatorPos = ((absTimeMs - start) / span) * 100;
+      }
+    }
+
+    const levels = this._timelineZoomLevels();
+    const zoomIdx = levels.indexOf(this._timelineZoomLevel || 1);
+    const canZoomIn = zoomIdx < levels.length - 1;
+    const canZoomOut = zoomIdx > 0;
+
+    return html`
+      <div class="timeline-wrap timeline-${orientation}">
+        <div class="timeline-header">
+          <span class="timeline-cam">${cam ? this._camName(cam) : "—"}</span>
+          <span class="timeline-range">
+            ${formatTime(new Date(start), t)} → ${formatTime(new Date(end), t)}
+          </span>
+          <div class="timeline-zoom">
+            <button
+              class="timeline-zoom-btn"
+              title=${t.timeline_zoom_out}
+              ?disabled=${!canZoomOut}
+              @click=${() => this._zoomTimelineStep(-1)}
+            >
+              <ha-icon icon="mdi:magnify-minus-outline"></ha-icon>
+            </button>
+            <button
+              class="timeline-zoom-btn"
+              title=${t.timeline_zoom_reset}
+              ?disabled=${this._timelineZoomLevel === 1}
+              @click=${() => this._resetTimelineZoom()}
+            >
+              <ha-icon icon="mdi:magnify-remove-outline"></ha-icon>
+            </button>
+            <button
+              class="timeline-zoom-btn"
+              title=${t.timeline_zoom_in}
+              ?disabled=${!canZoomIn}
+              @click=${() => this._zoomTimelineStep(1)}
+            >
+              <ha-icon icon="mdi:magnify-plus-outline"></ha-icon>
+            </button>
+          </div>
+        </div>
+        <div class="timeline-body timeline-${orientation}">
+          <div
+            class="timeline-track timeline-${orientation}"
+            @pointerdown=${(e) => this._onTimelinePointerDown(e)}
+            @pointermove=${(e) => this._onTimelinePointerMove(e)}
+            @pointerup=${(e) => this._onTimelinePointerUp(e)}
+            @pointercancel=${(e) => this._onTimelinePointerCancel(e)}
+            @wheel=${(e) => this._onTimelineWheel(e)}
+          >
+            <div class="timeline-axis">
+              ${ticks.map((tk) => html`
+                <div
+                  class="timeline-tick"
+                  style=${isSplit
+                    ? `top: ${tk.pos}%;`
+                    : `left: ${tk.pos}%;`}
+                >
+                  <span class="timeline-tick-label">${tk.label}</span>
+                </div>
+              `)}
+            </div>
+            ${indicatorPos != null
+              ? html`<div
+                  class="timeline-indicator"
+                  style=${isSplit ? `top: ${indicatorPos}%;` : `left: ${indicatorPos}%;`}
+                ></div>`
+              : ""}
+          </div>
+          <div class="timeline-marker-lane timeline-${orientation}">
+            ${visibleEvents.map((ev) => this._renderTimelineMarker(ev, start, span, isSplit, lang))}
+          </div>
+        </div>
+        ${events.length === 0 && !this._timelineError
+          ? html`<div class="timeline-empty">${t.no_events}</div>`
+          : ""}
+      </div>
+    `;
+  }
+
+  _buildTimelineTicks(start, end, isSplit) {
+    const span = end - start;
+    const hours = span / 3600000;
+    let stepHours;
+    if (hours <= 1.5) stepHours = 0.25;
+    else if (hours <= 3) stepHours = 0.5;
+    else if (hours <= 6) stepHours = 1;
+    else if (hours <= 24) stepHours = 3;
+    else if (hours <= 72) stepHours = 6;
+    else stepHours = 24;
+
+    const stepMs = stepHours * 3600000;
+    const ticks = [];
+    const startTick = Math.ceil(start / stepMs) * stepMs;
+    for (let t = startTick; t <= end; t += stepMs) {
+      const pos = ((t - start) / span) * 100;
+      const d = new Date(t);
+      const pad = (n) => String(n).padStart(2, "0");
+      const label = stepHours >= 24
+        ? `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.`
+        : stepHours >= 1
+          ? `${pad(d.getHours())}:00`
+          : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      ticks.push({ pos, label });
+    }
+    return ticks;
+  }
+
+  _renderTimelineMarker(ev, start, span, isSplit, lang) {
+    const t = this._t;
+    const ts = ev._ts.getTime();
+    const pos = ((ts - start) / span) * 100;
+    const snapUrl = this._snapshotUrl(ev);
+    const rawLabel = ev._llm?.label || ev._label || "";
+    const icon = labelIcon(rawLabel, this._config?.label_icons);
+    const color = labelColor(rawLabel, this._config?.label_colors);
+    const labelText = translateLabel(rawLabel, lang);
+    const titleText =
+      translateLlmTitle(ev._llm?.title, lang) || labelText || t.event_label;
+    const timeText = formatTime(ev._ts, t);
+    const description = ev._llm?.description || "";
+    const tooltipTitleAttr = `${timeText} · ${labelText || t.event_label}`;
+    const styleParts = [];
+    styleParts.push(isSplit ? `top: ${pos}%;` : `left: ${pos}%;`);
+    if (color) styleParts.push(`--marker-color: ${color};`);
+    return html`
+      <div
+        class="timeline-marker"
+        style=${styleParts.join(" ")}
+        title=${tooltipTitleAttr}
+        @pointerdown=${(e) => e.stopPropagation()}
+        @click=${(e) => { e.stopPropagation(); this._openClip(ev); }}
+      >
+        <div class="timeline-marker-thumb">
+          ${snapUrl
+            ? html`<img class="timeline-marker-img" src=${snapUrl} loading="lazy" @error=${(e) => { e.target.style.display = "none"; e.target.parentElement?.classList.add("placeholder"); }} />`
+            : html`<div class="timeline-marker-img placeholder"></div>`}
+        </div>
+        ${icon ? html`<ha-icon class="timeline-marker-icon" icon=${icon}></ha-icon>` : ""}
+        <div class="timeline-marker-tooltip">
+          <div class="timeline-marker-tooltip-title">${titleText}</div>
+          <div class="timeline-marker-tooltip-meta">
+            ${timeText}${labelText ? ` · ${labelText}` : ""}
+          </div>
+          ${description
+            ? html`<div class="timeline-marker-tooltip-desc">${this._shortDesc(description)}</div>`
+            : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderEventList(filtered) {
+    const t = this._t;
+    return html`
+      ${this._loading && this._events.length === 0
+        ? html`<div class="loading">${t.loading_events}</div>`
+        : ""}
+      ${filtered.map((ev) => this._renderRow(ev))}
+      ${!this._loading && filtered.length === 0
+        ? html`<div class="empty">${t.no_events}</div>`
+        : ""}
+      <div class="footer">
+        ${this._totalCap > (this._config.initial_events || 10)
+          ? html`<button class="loadless" @click=${() => this._loadLess()} ?disabled=${this._loading}>
+              ${t.load_less}
+            </button>`
+          : ""}
+        <button class="loadmore" @click=${() => this._loadMore()} ?disabled=${this._loading}>
+          ${this._loading
+            ? `${t.loading_events.replace("…", "")}…`
+            : `${t.load_more} (+${this._config.events_per_load})`}
+        </button>
+      </div>
+    `;
+  }
+
+  _renderFilters() {
+    const t = this._t;
+    const lang = detectLang(this.hass, this._config?.language);
+    const labels = this._availableLabels();
+    const cameras = this._availableCameras || [];
+    const activeCount = this._activeLabels ? this._activeLabels.size : 0;
+    const activeCamCount = this._activeCameras ? this._activeCameras.size : 0;
+    const dateLabels = {
+      all: t.filter_all,
+      today: t.filter_today,
+      yesterday: t.filter_yesterday,
+      week: t.filter_week,
+    };
+    const showCameraFilter = cameras.length > 1;
+    const configuredCams = this._configuredCameraIds();
+    const showLiveCamPicker = !this._config.multiview && configuredCams.length > 1;
+    return html`
+      <div class="filters">
+        ${showLiveCamPicker
+          ? html`
+              <div class="filter-dropdown">
+                <button
+                  class="filter-btn ${this._liveMode ? "active" : ""}"
+                  @click=${() => {
+                    this._showLiveCamMenu = !this._showLiveCamMenu;
+                    if (this._showLiveCamMenu) {
+                      this._showCameraMenu = false;
+                      this._showLabelMenu = false;
+                      this._showDateMenu = false;
+                    }
+                  }}
+                >
+                  <ha-icon icon="mdi:cctv"></ha-icon>
+                  <span>${this._liveCamera ? this._camName(this._liveCamera) : t.live}</span>
+                  <ha-icon icon="mdi:chevron-down"></ha-icon>
+                </button>
+                ${this._showLiveCamMenu
+                  ? html`
+                      <div class="filter-menu">
+                        ${configuredCams.map(
+                          (cam) => html`
+                            <div
+                              class="filter-menu-item ${this._liveCamera === cam ? "active" : ""}"
+                              @click=${() => {
+                                this._showLiveCamMenu = false;
+                                if (this._liveCamera === cam && this._liveMode) return;
+                                if (this._liveMode) {
+                                  this._switchLiveCamera(cam);
+                                } else {
+                                  this._openLive(cam);
+                                }
+                              }}
+                            >
+                              <ha-icon
+                                icon=${this._liveCamera === cam
+                                  ? "mdi:radiobox-marked"
+                                  : "mdi:radiobox-blank"}
+                              ></ha-icon>
+                              <span>${this._camName(cam)}</span>
+                            </div>
+                          `
+                        )}
+                      </div>
+                    `
+                  : ""}
+              </div>
+            `
+          : ""}
+
+        ${showCameraFilter
+          ? html`
+              <div class="filter-dropdown">
+                <button
+                  class="filter-btn ${activeCamCount > 0 ? "active" : ""}"
+                  @click=${() => this._toggleCameraMenu()}
+                >
+                  <ha-icon icon="mdi:camera-image"></ha-icon>
+                  <span>
+                    ${activeCamCount === 0
+                      ? t.all_cameras
+                      : activeCamCount === 1
+                      ? this._camName(Array.from(this._activeCameras)[0])
+                      : `${activeCamCount} ${t.cameras_plural}`}
+                  </span>
+                  <ha-icon icon="mdi:chevron-down"></ha-icon>
+                </button>
+                ${this._showCameraMenu
+                  ? html`
+                      <div class="filter-menu">
+                        ${cameras.map(
+                          (cam) => html`
+                            <div
+                              class="filter-menu-item ${this._activeCameras?.has(cam) ? "active" : ""}"
+                              @click=${() => this._toggleCamera(cam)}
+                            >
+                              <ha-icon
+                                icon=${this._activeCameras?.has(cam)
+                                  ? "mdi:checkbox-marked"
+                                  : "mdi:checkbox-blank-outline"}
+                              ></ha-icon>
+                              <span>${this._camName(cam)}</span>
+                            </div>
+                          `
+                        )}
+                      </div>
+                    `
+                  : ""}
+              </div>
+            `
+          : ""}
+
+        <div class="filter-dropdown">
+          <button
+            class="filter-btn ${activeCount > 0 ? "active" : ""}"
+            @click=${() => this._toggleLabelMenu()}
+          >
+            <ha-icon icon="mdi:tag-multiple-outline"></ha-icon>
+            <span>
+              ${activeCount === 0
+                ? t.all_labels
+                : activeCount === 1
+                ? translateLabel(Array.from(this._activeLabels)[0], lang)
+                : `${activeCount} ${t.labels_plural}`}
+            </span>
+            <ha-icon icon="mdi:chevron-down"></ha-icon>
+          </button>
+          ${this._showLabelMenu
+            ? html`
+                <div class="filter-menu">
+                  ${labels.length === 0
+                    ? html`<div class="filter-menu-empty">–</div>`
+                    : labels.map(
+                        (lbl) => html`
+                          <div
+                            class="filter-menu-item ${this._activeLabels?.has(lbl) ? "active" : ""}"
+                            @click=${() => this._toggleLabel(lbl)}
+                          >
+                            <ha-icon
+                              icon=${this._activeLabels?.has(lbl)
+                                ? "mdi:checkbox-marked"
+                                : "mdi:checkbox-blank-outline"}
+                            ></ha-icon>
+                            <span>${translateLabel(lbl, lang)}</span>
+                          </div>
+                        `
+                      )}
+                </div>
+              `
+            : ""}
+        </div>
+
+        <div class="filter-dropdown">
+          <button
+            class="filter-btn ${this._dateFilter && this._dateFilter !== "all" ? "active" : ""}"
+            @click=${() => this._toggleDateMenu()}
+          >
+            <ha-icon icon="mdi:calendar-outline"></ha-icon>
+            <span>${dateLabels[this._dateFilter] || dateLabels.all}</span>
+            <ha-icon icon="mdi:chevron-down"></ha-icon>
+          </button>
+          ${this._showDateMenu
+            ? html`
+                <div class="filter-menu">
+                  ${["all", "today", "yesterday", "week"].map(
+                    (k) => html`
+                      <div
+                        class="filter-menu-item ${this._dateFilter === k ? "active" : ""}"
+                        @click=${() => this._setDateFilter(k)}
+                      >
+                        <ha-icon
+                          icon=${this._dateFilter === k
+                            ? "mdi:radiobox-marked"
+                            : "mdi:radiobox-blank"}
+                        ></ha-icon>
+                        <span>${dateLabels[k]}</span>
+                      </div>
+                    `
+                  )}
+                </div>
+              `
+            : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderMultiview() {
+    const t = this._t;
+    const cameras = this._configuredCameraIds();
+    if (!cameras.length) {
+      return html`<div class="player-placeholder"><div>${t.no_events || "Keine Kameras konfiguriert"}</div></div>`;
+    }
+    const activeClip = this._activeClip;
+    const clipCam = activeClip?._camera;
+    const clipUrl = this._clipUrl ? this._authUrl(this._clipUrl) : null;
+    const cols = this._config.multiview_columns || 1;
+    return html`
+      <div class="multiview-grid" style="grid-template-columns: repeat(${cols}, 1fr);">
+        ${cameras.map((camId) => html`
+          <frigate-llm-live-tile
+            .hass=${this.hass}
+            .cameraId=${camId}
+            .cameraEntry=${this._camEntry(camId) || { name: camId }}
+            .cardConfig=${this._config}
+            .t=${t}
+            .clipUrl=${clipCam === camId ? clipUrl : null}
+            .clipError=${clipCam === camId ? this._clipError : null}
+            @close-clip=${() => this._closeClip()}
+          ></frigate-llm-live-tile>
+        `)}
+      </div>
+    `;
+  }
+
+  _renderPlayer() {
+    const t = this._t;
+    const showClip = !!this._activeClip;
+    const showLive = this._liveMode && !showClip;
+    const cameras = this._availableCameras || [];
+    const showLiveButton = this._config.show_live_button
+      && this._config.live_provider !== "off"
+      && cameras.length > 0;
+
+    if (!showClip && !showLive) {
+      return html`
+        <div class="player-placeholder">
+          <ha-icon icon="mdi:play-circle-outline"></ha-icon>
+          <div>${t.select_to_play}</div>
+          ${showLiveButton ? html`
+            <button class="live-btn" @click=${() => this._openLive()}>
+              <ha-icon icon="mdi:cctv"></ha-icon>
+              <span>${t.live}</span>
+            </button>
+          ` : ""}
+        </div>
+      `;
+    }
+
+    if (showLive) {
+      const entry = this._camEntry(this._liveCamera);
+      const hasHdSd = entry?.main && entry?.sub && entry.main !== entry.sub;
+      return html`
+        <div class="player-wrap live">
+          ${this._liveLoading ? html`<div class="loading">${t.live_connecting}</div>` : ""}
+          ${this._liveError ? html`<div class="error">${this._liveError}</div>` : ""}
+          ${this._liveProvider === "mjpeg"
+            ? (this._mjpegSignedUrl
+                ? html`<img class="live-mjpeg" src="${this._mjpegSignedUrl}" @error=${() => this._onMjpegError()} />`
+                : html`<div class="loading">${t.live_connecting}</div>`)
+            : html`<video class="player" autoplay playsinline muted controls></video>`
+          }
+          ${this._config.live_controls ? html`
+            <div class="live-controls live-controls--${this._config.live_controls_position}">
+              <span class="live-cam-name">${this._camName(this._liveCamera)}</span>
+              <span class="live-indicator">
+                <span class="live-dot"></span> LIVE
+                ${this._liveProvider ? html`<span class="live-proto">${this._liveProvider.toUpperCase()}</span>` : ""}
+                <span class="live-proto">${this._isExternal() ? "EXTERN" : "LAN"}</span>
+              </span>
+            </div>
+          ` : ""}
+          ${hasHdSd && this._config.hd_sd_button && this._config.hd_sd_button_position === "bottom" ? html`
+            <button class="overlay-btn hd-sd-btn hd-sd-btn--bottom" @click=${() => this._toggleHD()} title="${this._isHD ? "HD Stream aktiv" : "SD Stream aktiv"}">
+              <span class="hd-sd-label">${this._isHD ? "HD" : "SD"}</span>
+            </button>
+          ` : ""}
+          <div class="player-top-buttons">
+            ${hasHdSd && this._config.hd_sd_button && this._config.hd_sd_button_position === "top" ? html`
+              <button class="overlay-btn hd-sd-btn" @click=${() => this._toggleHD()} title="${this._isHD ? "HD Stream aktiv" : "SD Stream aktiv"}">
+                <span class="hd-sd-label">${this._isHD ? "HD" : "SD"}</span>
+              </button>
+            ` : ""}
+            <button class="overlay-btn" @click=${() => this._closeLive()} title="${t.close}">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="player-wrap">
+        ${this._clipError
+          ? html`<div class="error">${this._clipError}</div>`
+          : ""}
+        ${!this._clipUrl && !this._clipError
+          ? html`<div class="loading">${t.loading_clip}</div>`
+          : ""}
+        <video class="player" playsinline muted controls></video>
+        <div class="player-top-buttons">
+          ${showLiveButton ? html`
+            <button class="overlay-btn" @click=${() => { this._closeClip(); this._openLive(); }} title="${t.live}">
+              <ha-icon icon="mdi:cctv"></ha-icon>
+            </button>
+          ` : ""}
+          <button class="overlay-btn" @click=${() => this._closeClip()} title="${t.close}">
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  _renderLabelChip(rawLabel, displayLabel) {
+    if (!rawLabel && !displayLabel) return "";
+    const text = displayLabel || rawLabel;
+    const icon = labelIcon(rawLabel, this._config?.label_icons);
+    const color = labelColor(rawLabel, this._config?.label_colors);
+    const style = color ? `--chip-color: ${color};` : "";
+    const variant = this._config?.label_style || "soft";
+    return html`
+      <span class="chip chip-${variant}" style=${style}>
+        ${icon ? html`<ha-icon class="chip-icon" icon=${icon}></ha-icon>` : ""}
+        <span class="chip-text">${text}</span>
+      </span>
+    `;
+  }
+
+  _shortDesc(text) {
+    if (!text) return "";
+    const m = text.match(/^[^.!?\n]+[.!?]?/);
+    return m ? m[0].trim() : text.substring(0, 120);
+  }
+
+  _renderRow(ev) {
+    const t = this._t;
+    const lang = detectLang(this.hass, this._config?.language);
+    const title =
+      translateLlmTitle(ev._llm?.title, lang) ||
+      translateLabel(ev._label, lang) ||
+      t.event_label;
+    const fullDesc = ev._llm?.description || "";
+    const description = this._shortDesc(fullDesc);
+    const camera = ev._camera;
+    const rawLabel = ev._llm?.label || ev._label || "";
+    const label = translateLabel(rawLabel, lang);
+    const chip = this._renderLabelChip(rawLabel, label);
+    const timeStr = formatTime(ev._ts, t);
+    const snapUrl = this._snapshotUrl(ev);
+    const isActive =
+      this._activeClip &&
+      this._activeClip.media_content_id === ev.media_content_id;
+
+    return html`
+      <div class="row ${isActive ? "active" : ""}">
+        <div class="text" @click=${() => this._openClip(ev)}>
+          <div class="title-line">
+            <span class="row-title">${title}</span>
+            ${chip}
+          </div>
+          <div class="meta">
+            ${timeStr}${camera ? html` · <span class="cam">${this._camName(camera)}</span>` : ""}
+          </div>
+          ${description
+            ? html`<div class="desc">${description}</div>`
+            : html`<div class="desc placeholder">${t.no_llm}</div>`}
+        </div>
+        <div class="snap" @click=${(e) => {
+          e.stopPropagation();
+          this._openLightbox(ev, snapUrl);
+        }}>
+          ${snapUrl
+            ? html`<img
+                src="${snapUrl}"
+                loading="lazy"
+                alt="snapshot"
+                @error=${(e) => (e.target.style.opacity = "0.3")}
+              />`
+            : html`<div class="noimg"><ha-icon icon="mdi:image-off"></ha-icon></div>`}
+        </div>
+      </div>
+    `;
+  }
+
+  _extractFilename(ev) {
+    if (ev?.title) return ev.title;
+    const id = ev?.media_content_id || "";
+    if (!id) return "";
+    const decoded = decodeURIComponent(id);
+    const lastSlash = decoded.lastIndexOf("/");
+    return lastSlash >= 0 ? decoded.substring(lastSlash + 1) : decoded;
+  }
+
+  _renderLightbox() {
+    if (!this._lightbox) return "";
+    const t = this._t;
+    const lang = detectLang(this.hass, this._config?.language);
+    const ev = this._lightbox.ev;
+    const lbTitle =
+      translateLlmTitle(ev._llm?.title, lang) ||
+      translateLabel(ev._label, lang) ||
+      t.event_label;
+    const lbDesc = ev._llm?.description || "";
+    const lbLabel = translateLabel(ev._llm?.label || ev._label || "", lang);
+    const lbTime = formatTime(ev._ts, t);
+    const lbCam = ev._camera;
+    const lbFile = this._extractFilename(ev);
+    return html`
+      <div class="lightbox" @click=${() => this._closeLightbox()}>
+        <div class="lightbox-inner" @click=${(e) => e.stopPropagation()}>
+          <button class="lightbox-close" @click=${() => this._closeLightbox()}>
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+          <div class="lightbox-header">
+            <div class="lightbox-title">${lbTitle}</div>
+            <div class="lightbox-sub">
+              ${lbTime}${lbCam ? html` · <span class="cam">${this._camName(lbCam)}</span>` : ""}
+              ${lbLabel
+                ? html` · ${this._renderLabelChip(
+                    ev._llm?.label || ev._label || "",
+                    lbLabel
+                  )}`
+                : ""}
+            </div>
+          </div>
+          <img src="${this._lightbox.url}" alt="snapshot" />
+          <div class="lightbox-desc">
+            ${lbDesc
+              ? lbDesc
+              : html`<span class="placeholder">${t.no_llm}</span>`}
+          </div>
+          ${lbFile ? html`<div class="lightbox-file" title=${lbFile}><ha-icon icon="mdi:file-outline"></ha-icon> ${lbFile}</div>` : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  static get styles() {
+    return css`
+      :host {
+        display: block;
+        height: 100%;
+        --row-bg: var(--ha-card-background, var(--card-background-color, #fff));
+        --row-border: var(--divider-color, #e0e0e0);
+        --text-primary: var(--primary-text-color, #212121);
+        --text-secondary: var(--secondary-text-color, #727272);
+        --accent: var(--primary-color, #03a9f4);
+      }
+      ha-card {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        position: relative;
+        height: 100%;
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        flex-wrap: wrap;
+        flex-shrink: 0;
+      }
+      .title {
+        font-size: 1.1em;
+        font-weight: 500;
+        line-height: 1.2;
+        flex: 1 1 auto;
+        min-width: 0;
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .title ha-icon {
+        vertical-align: middle;
+      }
+      .spacer {
+        flex: 1;
+      }
+      .header .filters {
+        flex: 1;
+        justify-content: flex-end;
+        padding: 0;
+        border-bottom: none;
+        gap: 6px;
+      }
+      .iconbtn {
+        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+        border: none;
+        color: var(--text-primary);
+        cursor: pointer;
+        padding: 6px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      .iconbtn ha-icon {
+        pointer-events: none;
+      }
+      .iconbtn:hover {
+        background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+        color: var(--accent);
+      }
+      .split {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .split.is-split {
+        flex-direction: row;
+        align-items: stretch;
+      }
+      .split > .left,
+      .split > .right {
+        min-width: 0;
+        min-height: 0;
+      }
+      .split.is-stacked > .left,
+      .split.is-stacked > .right {
+        width: 100%;
+      }
+      .split.is-stacked > .left {
+        flex: 0 0 auto;
+        overflow: hidden;
+      }
+      .split.is-stacked > .left .player-wrap {
+        overflow: hidden;
+      }
+      .split.is-stacked > .right {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 120px;
+        overflow: hidden;
+      }
+      .split.is-split > .left {
+        flex: 1.4 1 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-start;
+        background: var(--row-bg);
+        padding: 12px;
+        box-sizing: border-box;
+        overflow: hidden;
+      }
+      .split.is-split > .left .player-wrap {
+        border-bottom: none;
+        border-radius: 6px;
+        overflow: hidden;
+        flex: 0 0 auto;
+      }
+      .split.is-split > .left .player-placeholder {
+        border-bottom: none;
+        flex: 0 0 auto;
+        min-height: 240px;
+        border-radius: 6px;
+      }
+      .split.is-split > .left video.player {
+        max-height: none;
+        width: 100%;
+        height: auto;
+        object-fit: contain;
+      }
+      .split.is-split > .right {
+        flex: 1 1 0;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .player-placeholder {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        color: var(--text-secondary);
+        background: rgba(0, 0, 0, 0.03);
+      }
+      .player-placeholder ha-icon {
+        --mdc-icon-size: 48px;
+        margin-bottom: 8px;
+      }
+      .player-wrap {
+        position: relative;
+        background: transparent;
+      }
+      .multiview-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }
+      .split.is-split > .left .multiview-grid {
+        height: auto;
+      }
+      .multiview-tile-placeholder {
+        position: relative;
+        background: transparent;
+        color: #fff;
+        min-height: 120px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.9em;
+        border-radius: 4px;
+      }
+      video.player {
+        display: block;
+        width: 100%;
+        max-height: 420px;
+        background: transparent;
+        object-fit: contain;
+      }
+      .split.is-split > .left video.player {
+        max-height: none;
+        height: 100%;
+      }
+      .overlay-btn {
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        border: none;
+        border-radius: 50%;
+        width: 34px;
+        height: 34px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      .overlay-btn:hover {
+        background: rgba(0, 0, 0, 0.8);
+      }
+      .overlay-btn ha-icon {
+        --mdc-icon-size: 20px;
+        pointer-events: none;
+      }
+      .closebtn {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        border: none;
+        border-radius: 50%;
+        width: 32px;
+        height: 32px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      .closebtn ha-icon {
+        pointer-events: none;
+      }
+      .filters {
+        display: flex;
+        gap: 6px;
+        padding: 8px 12px;
+        flex-wrap: wrap;
+        position: relative;
+      }
+      .filter-dropdown {
+        position: relative;
+      }
+      .filter-btn {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+        color: var(--text-primary);
+        border: none;
+        padding: 7px 8px;
+        border-radius: 10px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.82em;
+        font-weight: 500;
+        line-height: 1;
+        transition: background-color 0.15s ease, color 0.15s ease;
+      }
+      .filter-btn > ha-icon:last-child {
+        --mdc-icon-size: 16px;
+      }
+      .filter-btn:hover {
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        color: var(--accent);
+      }
+      .filter-dropdown:has(.filter-menu) .filter-btn {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        color: var(--accent);
+      }
+      .filter-btn.active {
+        color: var(--accent);
+      }
+      .filter-btn.active::before {
+        content: none;
+      }
+      .filter-btn ha-icon {
+        --mdc-icon-size: 18px;
+        flex-shrink: 0;
+        color: var(--text-secondary);
+      }
+      .filter-btn:hover ha-icon,
+      .filter-btn.active ha-icon,
+      .filter-dropdown:has(.filter-menu) .filter-btn ha-icon {
+        color: inherit;
+      }
+      .filter-btn > ha-icon:last-child {
+        --mdc-icon-size: 16px;
+        opacity: 0.55;
+        margin-left: -2px;
+      }
+      .filter-btn > span {
+        text-transform: capitalize;
+        white-space: nowrap;
+      }
+      .filter-menu {
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        background: var(--row-bg);
+        border: 1px solid var(--row-border);
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+        padding: 4px;
+        z-index: 10;
+        min-width: 180px;
+        max-height: 260px;
+        overflow-y: auto;
+      }
+      .filter-menu-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      .filter-menu-item > span {
+        text-transform: capitalize;
+      }
+      .filter-menu-item:hover {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+      .filter-menu-item.active {
+        color: var(--accent);
+      }
+      .filter-menu-item ha-icon {
+        --mdc-icon-size: 18px;
+      }
+      .filter-menu-empty {
+        padding: 10px;
+        color: var(--text-secondary);
+        text-align: center;
+      }
+      .list-wrap {
+        flex: 1 1 0;
+        min-height: 0;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        border-top: 8px solid transparent;
+        border-bottom: 8px solid transparent;
+      }
+      .list {
+        display: flex;
+        flex-direction: column;
+      }
+      .split.is-stacked > .right .filters {
+        flex-shrink: 0;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        padding: 10px 12px;
+        margin: 4px 8px;
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+        cursor: default;
+        transition: background-color 120ms, transform 120ms, box-shadow 120ms;
+      }
+      .row:hover {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        transform: translateY(-1px);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+      }
+      .row.active {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+      .text {
+        flex: 1;
+        min-width: 0;
+        cursor: pointer;
+      }
+      .title-line {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 2px;
+      }
+      .row-title {
+        font-weight: 500;
+        color: var(--text-primary);
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .chip {
+        --chip-color: var(--accent);
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 0.78em;
+        font-weight: 500;
+        line-height: 1;
+        padding: 4px 9px 4px 7px;
+        border-radius: 999px;
+        white-space: nowrap;
+        letter-spacing: 0.1px;
+        border: 1px solid transparent;
+      }
+      .chip-icon {
+        --mdc-icon-size: 15px;
+        flex-shrink: 0;
+      }
+      .chip-text {
+        white-space: nowrap;
+      }
+      .chip-soft {
+        background: color-mix(in srgb, var(--chip-color) 15%, transparent);
+        color: var(--chip-color);
+      }
+      .chip-solid {
+        background: var(--chip-color);
+        color: #fff;
+      }
+      .chip-solid .chip-icon {
+        color: #fff;
+      }
+      .chip-outline {
+        background: transparent;
+        color: var(--chip-color);
+        border-color: color-mix(in srgb, var(--chip-color) 55%, transparent);
+      }
+      .meta {
+        font-size: 0.78em;
+        color: var(--text-secondary);
+        margin-bottom: 4px;
+      }
+      .cam {
+        text-transform: capitalize;
+      }
+      .desc {
+        font-size: 0.88em;
+        color: var(--text-primary);
+        line-height: 1.3;
+      }
+      .desc.placeholder {
+        color: var(--text-secondary);
+        font-style: italic;
+      }
+      .snap {
+        flex: 0 0 120px;
+        width: 120px;
+        height: 72px;
+        border-radius: 6px;
+        overflow: hidden;
+        background: #111;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .snap img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .noimg {
+        color: #888;
+      }
+      .loading,
+      .empty {
+        padding: 20px;
+        text-align: center;
+        color: var(--text-secondary);
+      }
+      .error {
+        padding: 12px 16px;
+        color: var(--error-color, #c62828);
+        background: color-mix(in srgb, var(--error-color, #c62828) 10%, transparent);
+      }
+      .footer {
+        display: flex;
+        justify-content: center;
+        gap: 8px;
+        padding: 12px;
+      }
+      .loadmore {
+        background: var(--accent);
+        color: var(--text-primary-color, #fff);
+        border: none;
+        padding: 8px 20px;
+        border-radius: 18px;
+        cursor: pointer;
+        font-weight: 500;
+      }
+      .loadmore:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .loadless {
+        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+        color: var(--text-primary);
+        border: none;
+        padding: 8px 20px;
+        border-radius: 18px;
+        cursor: pointer;
+        font-weight: 500;
+      }
+      .loadless:hover {
+        background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+      }
+      .loadless:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .lightbox {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        box-sizing: border-box;
+      }
+      .lightbox-inner {
+        position: relative;
+        width: min(960px, calc(100vw - 40px));
+        max-height: calc(100vh - 40px);
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        background: var(--ha-card-background, var(--card-background-color, #fff));
+        color: var(--primary-text-color);
+        border-radius: var(--ha-card-border-radius, 12px);
+        padding: 20px 24px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      .lightbox-header {
+        margin-bottom: 12px;
+        color: var(--primary-text-color);
+        padding-right: 44px;
+        max-width: 100%;
+        box-sizing: border-box;
+      }
+      .lightbox-title {
+        font-size: 1.15em;
+        font-weight: 600;
+      }
+      .lightbox-sub {
+        margin-top: 4px;
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .lightbox-sub .chip-soft {
+        background: color-mix(in srgb, var(--chip-color) 25%, transparent);
+        color: var(--chip-color);
+      }
+      .lightbox-sub .chip-solid {
+        background: var(--chip-color);
+        color: #fff;
+      }
+      .lightbox-sub .chip-solid .chip-icon {
+        color: #fff;
+      }
+      .lightbox-sub .chip-outline {
+        background: transparent;
+        color: var(--chip-color);
+        border-color: color-mix(in srgb, var(--chip-color) 55%, transparent);
+      }
+      .lightbox-inner img {
+        max-width: 100%;
+        max-height: 65vh;
+        width: auto;
+        height: auto;
+        object-fit: contain;
+        border-radius: 8px;
+        display: block;
+        margin: 0 auto;
+      }
+      .lightbox-desc {
+        margin-top: 14px;
+        color: var(--primary-text-color);
+        font-size: 0.92em;
+        line-height: 1.45;
+        max-width: 100%;
+        box-sizing: border-box;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+      }
+      .lightbox-file {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
+        color: var(--secondary-text-color);
+        font-size: 0.78em;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        word-break: break-all;
+      }
+      .lightbox-file ha-icon {
+        --mdc-icon-size: 14px;
+        flex-shrink: 0;
+      }
+      .lightbox-desc .placeholder {
+        color: var(--secondary-text-color);
+        font-style: italic;
+      }
+      .lightbox-close {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        background: color-mix(in srgb, var(--primary-text-color) 12%, transparent);
+        color: var(--primary-text-color);
+        border: none;
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 2;
+      }
+      .lightbox-close:hover {
+        background: color-mix(in srgb, var(--primary-text-color) 22%, transparent);
+      }
+
+      /* ── Livestream styles ── */
+      .live-btn {
+        margin-top: 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 18px;
+        border-radius: 20px;
+        border: 1px solid var(--accent);
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        font-size: 0.9em;
+        transition: background 0.2s;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      .live-btn:hover {
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+      .live-btn ha-icon {
+        --mdc-icon-size: 18px;
+        pointer-events: none;
+      }
+      .live-controls {
+        position: absolute;
+        left: 0;
+        right: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 12px;
+        color: #fff;
+        font-size: 0.85em;
+        pointer-events: auto;
+      }
+      .live-controls--bottom {
+        bottom: 0;
+        background: linear-gradient(transparent, rgba(0,0,0,0.7));
+      }
+      .live-controls--top {
+        top: 0;
+        background: linear-gradient(rgba(0,0,0,0.7), transparent);
+      }
+      .cam-select {
+        background: rgba(0,0,0,0.5);
+        color: #fff;
+        border: 1px solid rgba(255,255,255,0.3);
+        border-radius: 4px;
+        padding: 3px 6px;
+        font-size: 0.85em;
+      }
+      .live-indicator {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 600;
+      }
+      .live-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #f44336;
+        animation: live-pulse 1.5s ease-in-out infinite;
+      }
+      @keyframes live-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+      .live-proto {
+        font-size: 0.75em;
+        opacity: 0.7;
+        font-weight: 400;
+      }
+      .live-cam-name {
+        font-weight: 500;
+      }
+      .live-mjpeg {
+        display: block;
+        width: 100%;
+        max-height: 420px;
+        object-fit: contain;
+        background: transparent;
+      }
+      .player-top-buttons {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        display: flex;
+        gap: 6px;
+        z-index: 2;
+      }
+      .hd-sd-btn {
+        border-radius: 6px !important;
+        min-width: 38px;
+      }
+      .hd-sd-btn--bottom {
+        position: absolute;
+        bottom: 8px;
+        right: 8px;
+        z-index: 3;
+      }
+      .hd-sd-label {
+        font-weight: 700;
+        font-size: 12px;
+        letter-spacing: 0.5px;
+        line-height: 1;
+      }
+      .player-wrap.live {
+        position: relative;
+        background: transparent;
+      }
+      .player-wrap.live video.player {
+        max-height: 420px;
+      }
+      .split.is-split > .left .live-mjpeg {
+        max-height: none;
+        height: auto;
+        object-fit: contain;
+      }
+      .split.is-split > .left .player-wrap.live video.player {
+        max-height: none;
+        height: auto;
+      }
+
+      /* ── Timeline (VoD recording) ── */
+      .timeline-player-wrap {
+        position: relative;
+        background: transparent;
+      }
+      video.timeline-player {
+        display: block;
+        width: 100%;
+        max-height: 420px;
+        background: #000;
+        object-fit: contain;
+      }
+      .split.is-split > .left video.timeline-player {
+        max-height: none;
+        height: 100%;
+      }
+      .timeline-cam-badge {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        font-size: 0.82em;
+        pointer-events: none;
+      }
+      .timeline-cam-badge ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      .timeline-wallclock {
+        margin-left: 8px;
+        padding-left: 8px;
+        border-left: 1px solid rgba(255, 255, 255, 0.3);
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        color: var(--accent);
+      }
+      .timeline-wrap {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      .timeline-wrap.timeline-vertical {
+        flex-direction: column;
+      }
+      .timeline-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.78em;
+        color: var(--text-secondary);
+        padding: 0 4px 6px 4px;
+        flex-shrink: 0;
+        gap: 8px;
+      }
+      .timeline-cam {
+        font-weight: 500;
+        text-transform: capitalize;
+        color: var(--text-primary);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .timeline-range {
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        flex: 1 1 auto;
+        text-align: right;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .timeline-zoom {
+        display: inline-flex;
+        gap: 2px;
+        flex-shrink: 0;
+      }
+      .timeline-zoom-btn {
+        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+        color: var(--text-primary);
+        border: none;
+        border-radius: 6px;
+        width: 26px;
+        height: 26px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      .timeline-zoom-btn ha-icon {
+        --mdc-icon-size: 16px;
+        pointer-events: none;
+      }
+      .timeline-zoom-btn:hover:not(:disabled) {
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        color: var(--accent);
+      }
+      .timeline-zoom-btn:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .timeline-track {
+        position: relative;
+        background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+        border-radius: 8px;
+        cursor: grab;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .timeline-track--dragging {
+        cursor: grabbing;
+      }
+      /* Body wraps the (clickable) track and the (visual) marker lane */
+      .timeline-body {
+        position: relative;
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+      }
+      .timeline-body.timeline-horizontal { flex-direction: column; }
+      .timeline-body.timeline-vertical   { flex-direction: row; }
+
+      /* Track: only the clickable axis bar — pan/seek/wheel happen here */
+      .timeline-track.timeline-horizontal {
+        height: 32px;
+        min-height: 32px;
+        flex: 0 0 32px;
+        border-radius: 8px 8px 0 0;
+      }
+      .timeline-track.timeline-vertical {
+        width: 60px;
+        min-width: 60px;
+        flex: 0 0 60px;
+        border-radius: 8px 0 0 8px;
+      }
+
+      /* Marker lane: visual only, marker clicks open clip */
+      .timeline-marker-lane {
+        position: relative;
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        overflow: visible;
+        background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+      }
+      .timeline-marker-lane.timeline-horizontal {
+        border-radius: 0 0 8px 8px;
+        height: 80px;
+        flex: 0 0 80px;
+      }
+      .timeline-marker-lane.timeline-vertical {
+        border-radius: 0 8px 8px 0;
+      }
+
+      .timeline-axis {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .timeline-tick {
+        position: absolute;
+        font-size: 0.7em;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+      .timeline-horizontal .timeline-tick {
+        top: 0;
+        bottom: 0;
+        transform: translateX(-50%);
+        width: 1px;
+        background: color-mix(in srgb, var(--text-secondary) 25%, transparent);
+      }
+      .timeline-horizontal .timeline-tick-label {
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        white-space: nowrap;
+      }
+      .timeline-vertical .timeline-tick {
+        left: 0;
+        right: 0;
+        transform: translateY(-50%);
+        height: 1px;
+        background: color-mix(in srgb, var(--text-secondary) 25%, transparent);
+      }
+      .timeline-vertical .timeline-tick-label {
+        position: absolute;
+        left: 4px;
+        top: 2px;
+        white-space: nowrap;
+      }
+      .timeline-indicator {
+        position: absolute;
+        background: var(--accent);
+        z-index: 3;
+        pointer-events: none;
+        box-shadow: 0 0 6px var(--accent);
+      }
+      .timeline-horizontal .timeline-indicator {
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        transform: translateX(-1px);
+      }
+      .timeline-vertical .timeline-indicator {
+        left: 0;
+        right: 0;
+        height: 2px;
+        transform: translateY(-1px);
+      }
+      .timeline-marker {
+        position: absolute;
+        --marker-color: var(--accent);
+        z-index: 2;
+        width: 36px;
+        height: 36px;
+        border-radius: 6px;
+        overflow: visible;
+        border: 2px solid var(--marker-color);
+        background: #111;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+        cursor: pointer;
+        transition: transform 100ms ease, box-shadow 100ms ease;
+      }
+      .timeline-marker-thumb {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        border-radius: 4px;
+        background: #111;
+      }
+      .timeline-marker-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .timeline-marker-thumb.placeholder,
+      .timeline-marker-img.placeholder {
+        background: linear-gradient(135deg, #333, #555);
+      }
+      /* Connecting line from marker to its exact moment on the axis */
+      .timeline-marker::before {
+        content: "";
+        position: absolute;
+        background: var(--marker-color);
+        z-index: -1;
+      }
+      /* Markers live inside .timeline-marker-lane and are positioned by left/top % */
+      .timeline-marker-lane.timeline-horizontal .timeline-marker {
+        top: 22px;
+        transform: translateX(-50%);
+      }
+      .timeline-marker-lane.timeline-horizontal .timeline-marker::before {
+        left: 50%;
+        bottom: 100%;
+        width: 2px;
+        height: 22px;
+        transform: translateX(-50%);
+      }
+      .timeline-marker-lane.timeline-horizontal .timeline-marker:hover {
+        transform: translateX(-50%) scale(1.15);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        z-index: 4;
+      }
+      .timeline-marker-lane.timeline-vertical .timeline-marker {
+        left: 22px;
+        transform: translateY(-50%);
+      }
+      .timeline-marker-lane.timeline-vertical .timeline-marker::before {
+        top: 50%;
+        right: 100%;
+        height: 2px;
+        width: 22px;
+        transform: translateY(-50%);
+      }
+      .timeline-marker-lane.timeline-vertical .timeline-marker:hover {
+        transform: translateY(-50%) scale(1.15);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        z-index: 4;
+      }
+
+      .timeline-marker-tooltip {
+        position: absolute;
+        background: rgba(0, 0, 0, 0.92);
+        color: #fff;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 0.8em;
+        line-height: 1.35;
+        min-width: 180px;
+        max-width: 260px;
+        white-space: normal;
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        z-index: 10;
+        transition: opacity 100ms ease;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      }
+      .timeline-marker-lane.timeline-horizontal .timeline-marker-tooltip {
+        top: 100%;
+        left: 50%;
+        transform: translateX(-50%);
+        margin-top: 10px;
+      }
+      .timeline-marker-lane.timeline-vertical .timeline-marker-tooltip {
+        top: 50%;
+        left: 100%;
+        transform: translateY(-50%);
+        margin-left: 10px;
+      }
+      .timeline-marker:hover .timeline-marker-tooltip {
+        opacity: 1;
+        visibility: visible;
+      }
+      .timeline-marker-tooltip-title { font-weight: 600; margin-bottom: 2px; }
+      .timeline-marker-tooltip-meta { opacity: 0.8; margin-bottom: 4px; }
+      .timeline-marker-tooltip-desc { opacity: 0.95; }
+
+      .timeline-debug {
+        margin-top: 6px;
+        padding: 6px 10px;
+        background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+        border-radius: 6px;
+        font-size: 0.72em;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: var(--text-secondary);
+        line-height: 1.45;
+      }
+      .timeline-debug-row {
+        display: flex;
+        gap: 6px;
+        align-items: baseline;
+      }
+      .timeline-debug-key {
+        flex-shrink: 0;
+        font-weight: 600;
+      }
+      .timeline-debug-val {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        word-break: break-all;
+      }
+      .timeline-marker-img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .timeline-marker-img.placeholder {
+        background: linear-gradient(135deg, #333, #555);
+      }
+      .timeline-marker-icon {
+        position: absolute;
+        bottom: -2px;
+        right: -2px;
+        --mdc-icon-size: 14px;
+        background: var(--marker-color);
+        color: #fff;
+        border-radius: 50%;
+        padding: 2px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+      }
+      .timeline-empty {
+        padding: 12px;
+        text-align: center;
+        color: var(--text-secondary);
+        font-size: 0.85em;
+      }
+
+      @media (max-width: 560px) {
+        .snap {
+          flex-basis: 96px;
+          width: 96px;
+          height: 64px;
+        }
+        .filters {
+          gap: 4px;
+          padding: 6px 8px;
+        }
+        .filter-btn {
+          padding: 6px 7px;
+          font-size: 0.78em;
+          gap: 4px;
+        }
+        .filter-btn > ha-icon:last-child {
+          display: none;
+        }
+        .filter-btn.active::before {
+          content: none;
+        }
+        .title {
+          justify-content: flex-end;
+        }
+        .player-wrap {
+          padding: 4px;
+          background: var(--row-bg);
+        }
+        .player-wrap video.player {
+          border-radius: 6px;
+        }
+      }
+    `;
+  }
+
+  static getConfigElement() {
+    return document.createElement("frigate-llm-vision-timeline-card-editor");
+  }
+
+  static getStubConfig() {
+    return {
+      cameras: "all",
+      initial_events: 10,
+      events_per_load: 10,
+      layout: "auto",
+      language: "auto",
+      label_style: "soft",
+    };
+  }
+}
+
+const EDITOR_LABELS = [
+  "person", "car", "dog", "cat", "bird", "bicycle",
+  "motorcycle", "package", "truck", "bus", "mouse",
+  "face", "license_plate", "amazon", "dhl", "ups",
+];
+
+class FrigateLlmVisionTimelineCardEditor extends LitElement {
+  static get properties() {
+    return {
+      hass: { type: Object },
+      _config: { state: true },
+      _expandedSection: { state: true },
+      _cameraEntries: { state: true },
+      _expandedCam: { state: true },
+    };
+  }
+
+  constructor() {
+    super();
+    this._config = {};
+    this._expandedSection = "general";
+    this._cameraEntries = [];
+    this._expandedCam = null;
+  }
+
+  setConfig(config) {
+    this._config = { ...config };
+    this._buildCameraEntries(config);
+  }
+
+  _buildCameraEntries(config) {
+    const map = FrigateLlmVisionTimelineCard._normalizeCamerasMap(config);
+    this._cameraEntries = Object.entries(map).map(([id, e]) => ({
+      id,
+      displayName: e.name || "",
+      main: e.main || "",
+      sub: e.sub || "",
+    }));
+  }
+
+  _applyCameraEntries() {
+    const cameras = {};
+    for (const e of this._cameraEntries) {
+      const id = (e.id || "").trim().toLowerCase();
+      if (!id) continue;
+      const entry = {};
+      if (e.displayName) entry.name = e.displayName;
+      if (e.main) entry.main = e.main;
+      if (e.sub) entry.sub = e.sub;
+      cameras[id] = entry;
+    }
+    const newConfig = { ...this._config };
+    if (Object.keys(cameras).length) {
+      newConfig.cameras = cameras;
+    } else {
+      delete newConfig.cameras;
+    }
+    this._config = newConfig;
+    this._dispatch();
+  }
+
+  _dispatch() {
+    this.dispatchEvent(
+      new CustomEvent("config-changed", {
+        detail: { config: { ...this._config } },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  _set(key, value) {
+    if (value === "" || value === undefined || value === null) {
+      const c = { ...this._config };
+      delete c[key];
+      this._config = c;
+    } else {
+      this._config = { ...this._config, [key]: value };
+    }
+    this._dispatch();
+  }
+
+  _toggleSection(name) {
+    this._expandedSection = this._expandedSection === name ? null : name;
+  }
+
+  get _lang() {
+    return detectLang(this.hass, this._config?.language);
+  }
+
+  render() {
+    if (!this._config) return html``;
+    return html`
+      <div class="editor">
+        ${this._renderSection("general", "Allgemein", "mdi:cog", this._renderGeneral())}
+        ${this._renderSection("cameras", "Kameras", "mdi:cctv", this._renderCameras())}
+        ${this._renderSection("display", "Anzeige", "mdi:monitor", this._renderDisplay())}
+        ${this._renderSection("filters", "Filter & Sprache", "mdi:filter", this._renderFilters())}
+        ${this._renderSection("labels", "Labels", "mdi:tag-multiple", this._renderLabels())}
+        ${this._renderSection("livestream", "Livestream", "mdi:cctv", this._renderLivestream())}
+        ${this._renderSection("advanced", "Erweitert", "mdi:tune", this._renderAdvanced())}
+      </div>
+    `;
+  }
+
+  _renderSection(id, title, icon, content) {
+    const open = this._expandedSection === id;
+    return html`
+      <div class="section ${open ? "open" : ""}">
+        <div class="section-header" @click=${() => this._toggleSection(id)}>
+          <ha-icon icon=${icon}></ha-icon>
+          <span>${title}</span>
+          <ha-icon class="chevron" icon=${open ? "mdi:chevron-up" : "mdi:chevron-down"}></ha-icon>
+        </div>
+        ${open ? html`<div class="section-body">${content}</div>` : ""}
+      </div>
+    `;
+  }
+
+  _renderGeneral() {
+    const cfg = this._config;
+    return html`
+      <ha-formfield label="Titel anzeigen">
+        <ha-switch
+          .checked=${cfg.show_title !== false}
+          @change=${(e) => this._set("show_title", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+
+      <ha-textfield
+        label="Titel"
+        .value=${cfg.title ?? "auto"}
+        .placeholder=${"auto"}
+        @change=${(e) => this._set("title", e.target.value || "auto")}
+      ></ha-textfield>
+
+      <ha-icon-picker
+        label="Titel Icon"
+        .value=${cfg.title_icon || ""}
+        @value-changed=${(e) => this._set("title_icon", e.detail?.value || undefined)}
+      ></ha-icon-picker>
+
+      <div class="row">
+        <ha-textfield
+          label="Initiale Events"
+          type="number"
+          .value=${String(cfg.initial_events ?? 10)}
+          @change=${(e) => this._set("initial_events", Number(e.target.value) || 10)}
+        ></ha-textfield>
+        <ha-textfield
+          label="Events pro Nachladen"
+          type="number"
+          .value=${String(cfg.events_per_load ?? 10)}
+          @change=${(e) => this._set("events_per_load", Number(e.target.value) || 10)}
+        ></ha-textfield>
+      </div>
+
+      <ha-textfield
+        label="Frigate Client ID"
+        .value=${cfg.frigate_client_id ?? "frigate"}
+        .placeholder=${"frigate"}
+        @change=${(e) => this._set("frigate_client_id", e.target.value || "frigate")}
+      ></ha-textfield>
+    `;
+  }
+
+  _renderCameras() {
+    const entries = this._cameraEntries;
+    return html`
+      <p class="hint">Nur hier gelistete Kameras werden geladen. Leer lassen = alle Frigate-Kameras.</p>
+
+      ${entries.map((entry, idx) => {
+        const isOpen = this._expandedCam === idx;
+        const label = entry.displayName || entry.id || `Kamera ${idx + 1}`;
+        return html`
+          <div class="cam-entry ${isOpen ? "open" : ""}">
+            <div class="cam-entry-header" @click=${() => { this._expandedCam = isOpen ? null : idx; }}>
+              <ha-icon icon="mdi:cctv" style="--mdc-icon-size:18px;"></ha-icon>
+              <span class="cam-entry-title">${label}</span>
+              <button class="stream-del" @click=${(e) => {
+                e.stopPropagation();
+                const newEntries = [...this._cameraEntries];
+                newEntries.splice(idx, 1);
+                this._cameraEntries = newEntries;
+                if (this._expandedCam === idx) this._expandedCam = null;
+                this._applyCameraEntries();
+              }}><ha-icon icon="mdi:close"></ha-icon></button>
+              <ha-icon class="chevron" icon=${isOpen ? "mdi:chevron-up" : "mdi:chevron-down"} style="--mdc-icon-size:18px;"></ha-icon>
+            </div>
+            ${isOpen ? html`
+              <div class="cam-entry-body">
+                <ha-textfield
+                  label="Frigate Kamera-ID"
+                  .value=${entry.id}
+                  placeholder="z.B. einfahrt"
+                  @change=${(e) => {
+                    const newEntries = [...this._cameraEntries];
+                    newEntries[idx] = { ...entry, id: e.target.value.trim() };
+                    this._cameraEntries = newEntries;
+                    this._applyCameraEntries();
+                  }}
+                ></ha-textfield>
+                <ha-textfield
+                  label="Anzeigename"
+                  .value=${entry.displayName}
+                  placeholder="z.B. Einfahrt"
+                  @change=${(e) => {
+                    const newEntries = [...this._cameraEntries];
+                    newEntries[idx] = { ...entry, displayName: e.target.value.trim() };
+                    this._cameraEntries = newEntries;
+                    this._applyCameraEntries();
+                  }}
+                ></ha-textfield>
+                <div class="row">
+                  <ha-textfield
+                    label="Main-Stream (HD)"
+                    .value=${entry.main || ""}
+                    placeholder="z.B. einfahrt_1"
+                    @change=${(e) => {
+                      const newEntries = [...this._cameraEntries];
+                      newEntries[idx] = { ...entry, main: e.target.value.trim() };
+                      this._cameraEntries = newEntries;
+                      this._applyCameraEntries();
+                    }}
+                  ></ha-textfield>
+                  <ha-textfield
+                    label="Sub-Stream (SD)"
+                    .value=${entry.sub || ""}
+                    placeholder="z.B. einfahrt_2"
+                    @change=${(e) => {
+                      const newEntries = [...this._cameraEntries];
+                      newEntries[idx] = { ...entry, sub: e.target.value.trim() };
+                      this._cameraEntries = newEntries;
+                      this._applyCameraEntries();
+                    }}
+                  ></ha-textfield>
+                </div>
+                <p class="hint">go2rtc-Stream-Namen. Main = Fullscreen-HD, Sub = Kachel-Livestream (niedriger Bandbreiten-Verbrauch).</p>
+              </div>
+            ` : ""}
+          </div>
+        `;
+      })}
+
+      <button
+        class="add-btn"
+        @click=${() => {
+          this._cameraEntries = [...this._cameraEntries, { id: "", displayName: "", main: "", sub: "" }];
+          this._expandedCam = this._cameraEntries.length - 1;
+        }}
+      >
+        <ha-icon icon="mdi:plus"></ha-icon> Kamera hinzufügen
+      </button>
+    `;
+  }
+
+  _renderDisplay() {
+    const cfg = this._config;
+    const layout = cfg.layout ?? "auto";
+    const multiviewActive = cfg.multiview === true;
+    const viewMode = multiviewActive ? "events" : (cfg.view_mode ?? "events");
+    return html`
+      <div class="select-row">
+        <label>Ansicht</label>
+        <select
+          .value=${viewMode}
+          ?disabled=${multiviewActive}
+          @change=${(e) => this._set("view_mode", e.target.value)}
+        >
+          <option value="events" ?selected=${viewMode === "events"}>Events (Liste)</option>
+          <option value="timeline" ?selected=${viewMode === "timeline"}>Timeline (Aufnahme)</option>
+        </select>
+      </div>
+      ${multiviewActive
+        ? html`<p class="hint">Timeline-Modus ist deaktiviert, solange Multiview aktiv ist (siehe Tab „Livestream").</p>`
+        : ""}
+
+      ${viewMode === "timeline" && !multiviewActive ? html`
+        <ha-textfield
+          label="Timeline-Fenster (Stunden, 1-168)"
+          type="number"
+          min="1"
+          max="168"
+          .value=${String(cfg.timeline_window_hours ?? 24)}
+          @change=${(e) => this._set("timeline_window_hours", Math.max(1, Math.min(168, Number(e.target.value) || 24)))}
+        ></ha-textfield>
+        <p class="hint">Zeitraum der Frigate-Aufnahme, der in der Timeline angezeigt wird (rückwirkend ab jetzt).</p>
+      ` : ""}
+
+      <div class="select-row">
+        <label>Layout</label>
+        <select
+          .value=${layout}
+          @change=${(e) => this._set("layout", e.target.value)}
+        >
+          <option value="auto" ?selected=${layout === "auto"}>Auto</option>
+          <option value="stacked" ?selected=${layout === "stacked"}>Stacked</option>
+          <option value="split" ?selected=${layout === "split"}>Split</option>
+        </select>
+      </div>
+
+      <ha-textfield
+        label="Desktop Breakpoint (px)"
+        type="number"
+        .value=${String(cfg.desktop_breakpoint ?? 800)}
+        @change=${(e) => this._set("desktop_breakpoint", Number(e.target.value) || 800)}
+      ></ha-textfield>
+
+      <ha-formfield label="Section Mode (füllt Section-Zelle zu 100%)">
+        <ha-switch
+          .checked=${cfg.section_mode === true}
+          @change=${(e) => this._set("section_mode", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+
+      ${cfg.section_mode
+        ? html`<p class="hint">Höhe/Breite werden im Section Mode ignoriert — die Card füllt ihre Grid-Zelle.</p>`
+        : html`
+            <ha-textfield
+              label="Höhe (Fallback)"
+              .value=${cfg.height ?? cfg.max_height ?? "auto"}
+              .placeholder=${"auto"}
+              @change=${(e) => this._set("height", e.target.value || "auto")}
+            ></ha-textfield>
+
+            <ha-textfield
+              label="Mobile Höhe (< Desktop Breakpoint)"
+              .value=${cfg.mobile_height ?? ""}
+              .placeholder=${"leer = Fallback"}
+              @change=${(e) => this._set("mobile_height", e.target.value || null)}
+            ></ha-textfield>
+
+            <ha-textfield
+              label="Desktop Höhe (≥ Desktop Breakpoint)"
+              .value=${cfg.desktop_height ?? ""}
+              .placeholder=${"leer = Fallback"}
+              @change=${(e) => this._set("desktop_height", e.target.value || null)}
+            ></ha-textfield>
+
+            <ha-textfield
+              label="Breite"
+              .value=${cfg.width ?? cfg.card_width ?? "auto"}
+              .placeholder=${"auto"}
+              @change=${(e) => this._set("width", e.target.value || "auto")}
+            ></ha-textfield>
+          `}
+    `;
+  }
+
+  _renderFilters() {
+    const cfg = this._config;
+    const lang = cfg.language ?? "auto";
+    return html`
+      <ha-formfield label="Filter anzeigen">
+        <ha-switch
+          .checked=${cfg.show_filters !== false}
+          @change=${(e) => this._set("show_filters", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+
+      <ha-formfield label="LLM Vision Anreicherung">
+        <ha-switch
+          .checked=${cfg.llm_vision !== false}
+          @change=${(e) => this._set("llm_vision", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+
+      <div class="select-row">
+        <label>Sprache</label>
+        <select
+          .value=${lang}
+          @change=${(e) => this._set("language", e.target.value)}
+        >
+          <option value="auto" ?selected=${lang === "auto"}>Auto</option>
+          <option value="de" ?selected=${lang === "de"}>Deutsch</option>
+          <option value="en" ?selected=${lang === "en"}>English</option>
+        </select>
+      </div>
+    `;
+  }
+
+  _renderLabels() {
+    const cfg = this._config;
+    const colors = cfg.label_colors || {};
+    const icons = cfg.label_icons || {};
+    const style = cfg.label_style ?? "soft";
+    const lang = this._lang;
+
+    return html`
+      <div class="select-row">
+        <label>Label Stil</label>
+        <select
+          .value=${style}
+          @change=${(e) => this._set("label_style", e.target.value)}
+        >
+          <option value="soft" ?selected=${style === "soft"}>Soft</option>
+          <option value="solid" ?selected=${style === "solid"}>Solid</option>
+          <option value="outline" ?selected=${style === "outline"}>Outline</option>
+        </select>
+      </div>
+
+      <p class="hint">Label-Farben und -Icons (leer lassen für Standard):</p>
+
+      ${EDITOR_LABELS.map((lbl) => {
+        const displayName = translateLabel(lbl, lang);
+        const colorVal = colors[lbl] || "";
+        return html`
+          <div class="label-row">
+            <span class="label-name">${displayName}</span>
+            <input
+              type="color"
+              .value=${colorVal || "#03a9f4"}
+              title="Farbe für ${displayName}"
+              @input=${(e) => {
+                const newColors = { ...colors, [lbl]: e.target.value };
+                this._set("label_colors", newColors);
+              }}
+            />
+            <ha-textfield
+              class="label-color-field"
+              .value=${colorVal}
+              placeholder="#03a9f4"
+              @change=${(e) => {
+                const val = e.target.value.trim();
+                const newColors = { ...(this._config.label_colors || {}) };
+                if (val) {
+                  newColors[lbl] = val;
+                } else {
+                  delete newColors[lbl];
+                }
+                this._set(
+                  "label_colors",
+                  Object.keys(newColors).length ? newColors : undefined
+                );
+              }}
+            ></ha-textfield>
+            <ha-textfield
+              class="label-icon-field"
+              .value=${icons[lbl] || ""}
+              placeholder="mdi:..."
+              @change=${(e) => {
+                const val = e.target.value.trim();
+                const newIcons = { ...(this._config.label_icons || {}) };
+                if (val) {
+                  newIcons[lbl] = val;
+                } else {
+                  delete newIcons[lbl];
+                }
+                this._set(
+                  "label_icons",
+                  Object.keys(newIcons).length ? newIcons : undefined
+                );
+              }}
+            ></ha-textfield>
+          </div>
+        `;
+      })}
+
+      <ha-textfield
+        label="Standard-Farbe (default)"
+        .value=${colors.default || ""}
+        .placeholder=${"#03a9f4"}
+        @change=${(e) => {
+          const val = e.target.value.trim();
+          const newColors = { ...(this._config.label_colors || {}) };
+          if (val) {
+            newColors.default = val;
+          } else {
+            delete newColors.default;
+          }
+          this._set(
+            "label_colors",
+            Object.keys(newColors).length ? newColors : undefined
+          );
+        }}
+      ></ha-textfield>
+    `;
+  }
+
+  _renderLivestream() {
+    const cfg = this._config;
+    const provider = cfg.live_provider || "auto";
+    const modes = cfg.go2rtc_modes || "webrtc,mse,mjpeg";
+    return html`
+      <div class="field">
+        <label>Live Provider</label>
+        <select @change=${(e) => this._set("live_provider", e.target.value)}>
+          ${["auto", "go2rtc", "mjpeg", "off"].map((v) => html`
+            <option value=${v} ?selected=${provider === v}>${v}</option>
+          `)}
+        </select>
+      </div>
+      <ha-textfield
+        label="Frigate URL (z.B. http://192.168.178.47:5000 – go2rtc via Frigate)"
+        .value=${cfg.frigate_url || ""}
+        .placeholder=${"(nicht gesetzt)"}
+        @change=${(e) => this._set("frigate_url", e.target.value || null)}
+      ></ha-textfield>
+      <ha-textfield
+        label="go2rtc URL intern (z.B. http://192.168.178.47:1984)"
+        .value=${cfg.go2rtc_url || ""}
+        .placeholder=${"(LAN)"}
+        @change=${(e) => this._set("go2rtc_url", e.target.value || null)}
+      ></ha-textfield>
+      <ha-textfield
+        label="go2rtc URL extern (z.B. https://go2rtc.example.com)"
+        .value=${cfg.go2rtc_url_external || ""}
+        .placeholder=${"(extern via Reverse Proxy)"}
+        @change=${(e) => this._set("go2rtc_url_external", e.target.value || null)}
+      ></ha-textfield>
+      <ha-textfield
+        label="go2rtc Modes (z.B. webrtc,mse,mjpeg)"
+        .value=${modes}
+        @change=${(e) => this._set("go2rtc_modes", e.target.value)}
+      ></ha-textfield>
+      <ha-textfield
+        label="Standard-Live-Kamera (leer = erste verfügbare)"
+        .value=${cfg.live_camera || ""}
+        .placeholder=${"(auto)"}
+        @change=${(e) => this._set("live_camera", e.target.value || null)}
+      ></ha-textfield>
+      <ha-formfield label="Live-Button anzeigen">
+        <ha-switch
+          .checked=${cfg.show_live_button !== false}
+          @change=${(e) => this._set("show_live_button", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+      <ha-formfield label="Auto-Start Livestream beim Öffnen">
+        <ha-switch
+          .checked=${cfg.live_autostart !== false}
+          @change=${(e) => this._set("live_autostart", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+
+      <ha-formfield label="Live-Controls Overlay anzeigen">
+        <ha-switch
+          .checked=${cfg.live_controls !== false}
+          @change=${(e) => this._set("live_controls", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+      <div class="field">
+        <label>Live-Controls Position</label>
+        <select @change=${(e) => this._set("live_controls_position", e.target.value)}>
+          ${["bottom", "top"].map((v) => html`
+            <option value=${v} ?selected=${(cfg.live_controls_position || "bottom") === v}>${v}</option>
+          `)}
+        </select>
+      </div>
+
+      <ha-formfield label="HD/SD-Button anzeigen">
+        <ha-switch
+          .checked=${cfg.hd_sd_button !== false}
+          @change=${(e) => this._set("hd_sd_button", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+      <div class="field">
+        <label>HD/SD-Button Position</label>
+        <select @change=${(e) => this._set("hd_sd_button_position", e.target.value)}>
+          ${["top", "bottom"].map((v) => html`
+            <option value=${v} ?selected=${(cfg.hd_sd_button_position || "top") === v}>${v}</option>
+          `)}
+        </select>
+      </div>
+
+      <ha-formfield label="Multiview (alle Kameras gleichzeitig live)">
+        <ha-switch
+          .checked=${cfg.multiview === true}
+          @change=${(e) => this._set("multiview", e.target.checked)}
+        ></ha-switch>
+      </ha-formfield>
+
+      ${cfg.multiview ? html`
+        <div class="field">
+          <label>Multiview Layout</label>
+          <select @change=${(e) => this._set("multiview_layout", e.target.value)}>
+            ${["auto", "split", "stacked"].map((v) => html`
+              <option value=${v} ?selected=${(cfg.multiview_layout || "auto") === v}>${v}</option>
+            `)}
+          </select>
+        </div>
+        <ha-textfield
+          label="Kameras pro Zeile (1-4)"
+          type="number"
+          min="1"
+          max="4"
+          .value=${String(cfg.multiview_columns || 1)}
+          @change=${(e) => this._set("multiview_columns", Math.max(1, Math.min(4, Number(e.target.value) || 1)))}
+        ></ha-textfield>
+      ` : ""}
+    `;
+  }
+
+  _renderAdvanced() {
+    const cfg = this._config;
+    return html`
+      <ha-textfield
+        label="Dedupe Window (Sekunden)"
+        type="number"
+        .value=${String(cfg.dedupe_window_seconds ?? 30)}
+        @change=${(e) => this._set("dedupe_window_seconds", Number(e.target.value))}
+      ></ha-textfield>
+      <ha-textfield
+        label="Auto-Refresh (Sekunden, 0 = aus)"
+        type="number"
+        min="0"
+        .value=${String(cfg.auto_refresh_seconds ?? 0)}
+        @change=${(e) => this._set("auto_refresh_seconds", Math.max(0, Number(e.target.value) || 0))}
+      ></ha-textfield>
+      <p class="hint">Periodischer Refetch der Frigate- und LLM-Vision-Events. Pausiert, wenn der Tab nicht sichtbar ist.</p>
+    `;
+  }
+
+  static get styles() {
+    return css`
+      .editor {
+        padding: 0;
+      }
+      .section {
+        border: 1px solid var(--divider-color, #e0e0e0);
+        border-radius: 8px;
+        margin-bottom: 8px;
+        overflow: hidden;
+      }
+      .section-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        cursor: pointer;
+        font-weight: 500;
+        background: var(--secondary-background-color, #f5f5f5);
+        user-select: none;
+      }
+      .section-header:hover {
+        background: var(--divider-color, #e8e8e8);
+      }
+      .section-header .chevron {
+        margin-left: auto;
+        --mdc-icon-size: 20px;
+      }
+      .section-header ha-icon:first-child {
+        --mdc-icon-size: 20px;
+        color: var(--primary-color);
+      }
+      .section-body {
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .field label {
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+      }
+      .field select {
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid var(--divider-color, #ccc);
+        background: var(--card-background-color, #fff);
+        color: var(--primary-text-color);
+        font-size: 1em;
+      }
+      ha-textfield {
+        display: block;
+        width: 100%;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+      }
+      .row > * {
+        flex: 1;
+      }
+      .select-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .select-row label {
+        min-width: 80px;
+        font-size: 0.9em;
+        color: var(--primary-text-color);
+      }
+      .select-row select {
+        flex: 1;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--divider-color, #ccc);
+        background: var(--card-background-color, #fff);
+        color: var(--primary-text-color);
+        font-size: 0.95em;
+        font-family: inherit;
+        outline: none;
+        cursor: pointer;
+        appearance: auto;
+      }
+      .select-row select:focus {
+        border-color: var(--primary-color);
+      }
+      ha-formfield {
+        display: flex;
+        align-items: center;
+        padding: 4px 0;
+        --mdc-theme-secondary: var(--primary-color);
+      }
+      .hint {
+        font-size: 0.82em;
+        color: var(--secondary-text-color);
+        margin: 4px 0 0 0;
+      }
+      .label-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .label-name {
+        min-width: 90px;
+        font-size: 0.88em;
+        font-weight: 500;
+      }
+      .label-row input[type="color"] {
+        width: 32px;
+        height: 32px;
+        min-width: 32px;
+        padding: 0;
+        border: 1px solid var(--divider-color, #ccc);
+        border-radius: 6px;
+        cursor: pointer;
+        background: none;
+      }
+      .label-color-field {
+        width: 90px;
+        min-width: 90px;
+        flex: 0 0 90px;
+        --mdc-text-field-height: 36px;
+      }
+      .label-icon-field {
+        flex: 1;
+        --mdc-text-field-height: 36px;
+      }
+      .stream-del {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: var(--error-color, #c62828);
+        padding: 4px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        --mdc-icon-size: 18px;
+      }
+      .stream-del:hover {
+        background: color-mix(in srgb, var(--error-color, #c62828) 12%, transparent);
+      }
+      .add-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: none;
+        border: 1px dashed var(--divider-color, #ccc);
+        border-radius: 8px;
+        padding: 8px 16px;
+        cursor: pointer;
+        color: var(--primary-color);
+        font-size: 0.88em;
+        font-family: inherit;
+        --mdc-icon-size: 18px;
+      }
+      .add-btn:hover {
+        background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+      }
+      .cam-entry {
+        border: 1px solid var(--divider-color, #e0e0e0);
+        border-radius: 6px;
+        margin-bottom: 6px;
+        overflow: hidden;
+      }
+      .cam-entry-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        cursor: pointer;
+        background: var(--secondary-background-color, #f5f5f5);
+        user-select: none;
+      }
+      .cam-entry-header:hover {
+        background: var(--divider-color, #e8e8e8);
+      }
+      .cam-entry-title {
+        flex: 1;
+        font-size: 0.9em;
+        font-weight: 500;
+      }
+      .cam-entry-header .chevron {
+        margin-left: 0;
+      }
+      .cam-entry-body {
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+    `;
+  }
+}
+
+class FrigateLlmLiveTile extends LitElement {
+  static get properties() {
+    return {
+      hass: { attribute: false },
+      cameraId: { type: String },
+      cameraEntry: { attribute: false },
+      cardConfig: { attribute: false },
+      t: { attribute: false },
+      clipUrl: { attribute: false },
+      clipError: { attribute: false },
+      _provider: { state: true },
+      _loading: { state: true },
+      _error: { state: true },
+      _isHD: { state: true },
+      _mjpegSignedUrl: { state: true },
+      _mp4SignedUrl: { state: true },
+    };
+  }
+
+  constructor() {
+    super();
+    this._provider = null;
+    this._loading = true;
+    this._error = null;
+    this._isHD = false;
+    this._mjpegSignedUrl = null;
+    this._mp4SignedUrl = null;
+    this._lc = null;
+    this._started = false;
+  }
+
+  updated(changed) {
+    if (!this._started && this.hass && this.cameraId && this.cardConfig) {
+      this._started = true;
+      this._start();
+    }
+    if (changed.has("clipUrl")) {
+      if (this.clipUrl) {
+        this._enterClipMode();
+      } else if (this._clipMode) {
+        this._exitClipMode();
+      }
+    }
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._cleanupLivestream();
+    this._cleanupClip();
+  }
+
+  async _enterClipMode() {
+    this._clipMode = true;
+    this._cleanupLivestream();
+    this._provider = null;
+    this._loading = false;
+    this._error = null;
+    await this.updateComplete;
+    const v = this.renderRoot?.querySelector("video.clip");
+    if (!v || !this.clipUrl) return;
+    const url = this.clipUrl;
+    const isHls = /\.m3u8($|\?)/i.test(url);
+    if (this._hls) { try { this._hls.destroy(); } catch {} this._hls = null; }
+    if (isHls && !this._hlsNativeSupported()) {
+      try {
+        const Hls = await loadHls();
+        if (Hls && Hls.isSupported()) {
+          this._hls = new Hls({ maxBufferLength: 30 });
+          this._hls.loadSource(url);
+          this._hls.attachMedia(v);
+          this._hls.on(Hls.Events.MANIFEST_PARSED, () => this._tryAutoplay(v));
+          return;
+        }
+      } catch {}
+    }
+    v.src = url;
+    try { v.load(); } catch {}
+    this._tryAutoplay(v);
+  }
+
+  _cleanupClip() {
+    if (this._hls) { try { this._hls.destroy(); } catch {} this._hls = null; }
+    const v = this.renderRoot?.querySelector("video.clip");
+    if (v) { try { v.pause(); } catch {} v.removeAttribute("src"); try { v.load(); } catch {} }
+  }
+
+  async _exitClipMode() {
+    this._clipMode = false;
+    this._cleanupClip();
+    this._loading = true;
+    await this.updateComplete;
+    this._start();
+  }
+
+  _closeClip() {
+    this.dispatchEvent(new CustomEvent("close-clip", { bubbles: true, composed: true }));
+  }
+
+  _camDisplayName() {
+    return this.cameraEntry?.name || this.cameraId || "?";
+  }
+
+  _streamName(hd) {
+    const e = this.cameraEntry || {};
+    if (hd && e.main) return e.main;
+    if (!hd && e.sub) return e.sub;
+    return e.main || e.sub || this.cameraId;
+  }
+
+  /* Helpers reused by clip + render (live protocols live in LivestreamController) */
+  async _tryAutoplay(v) {
+    try { await v.play(); }
+    catch (e) {
+      if (e && (e.name === "NotAllowedError" || e.name === "AbortError")) {
+        v.muted = true;
+        try { await v.play(); } catch {}
+      }
+    }
+  }
+  _hlsNativeSupported() {
+    const v = document.createElement("video");
+    return !!v.canPlayType && v.canPlayType("application/vnd.apple.mpegurl") !== "";
+  }
+  _isExternal() { return !isLocalNetwork(); }
+
+  /* Livestream wrappers */
+  _ensureLivestreamController() {
+    if (this._lc) return this._lc;
+    this._lc = new LivestreamController({
+      logPrefix: "[FrigateLLMTile Live]",
+      failedMessage: this.t?.live_failed,
+      getConfig: () => this.cardConfig,
+      getVideoEl: () => this.renderRoot?.querySelector("video.player"),
+      getStreamName: (hd) => this._streamName(hd),
+      onUpdate: () => this.updateComplete,
+      onState: (patch) => this._applyLiveState(patch),
+    });
+    return this._lc;
+  }
+
+  _applyLiveState(patch) {
+    if ("loading" in patch) this._loading = !!patch.loading;
+    if ("provider" in patch) this._provider = patch.provider ?? null;
+    if ("error" in patch) this._error = patch.error ?? null;
+    if ("mjpegUrl" in patch) this._mjpegSignedUrl = patch.mjpegUrl ?? null;
+    if ("mp4Url" in patch) this._mp4SignedUrl = patch.mp4Url ?? null;
+  }
+
+  _start() {
+    if (!this.cameraId || !this.cardConfig) return;
+    this._loading = true;
+    this._provider = null;
+    this._error = null;
+    const lc = this._ensureLivestreamController();
+    lc.cleanup();
+    lc._isHD = !!this._isHD;
+    this.updateComplete.then(() => lc.start(this.cameraId));
+  }
+
+  _cleanupLivestream() {
+    this._lc?.cleanup();
+  }
+
+  _restart() {
+    this._loading = true;
+    this._provider = null;
+    this._error = null;
+    this._ensureLivestreamController().restart();
+  }
+
+  _toggleHD() {
+    this._isHD = !this._isHD;
+    this._ensureLivestreamController().setHD(this._isHD);
+  }
+
+  render() {
+    const t = this.t || {};
+    const name = this._camDisplayName();
+    if (this._clipMode) {
+      return html`
+        <div class="player-wrap clip">
+          ${this.clipError ? html`<div class="error">${this.clipError}</div>` : ""}
+          ${!this.clipUrl && !this.clipError ? html`<div class="loading">${t.loading_clip || "Lade Clip…"}</div>` : ""}
+          <video class="clip player" playsinline controls></video>
+          <div class="live-controls">
+            <span class="live-cam-name">${name}</span>
+            <span class="live-indicator"><ha-icon icon="mdi:play-circle"></ha-icon> CLIP</span>
+          </div>
+          <div class="player-top-buttons">
+            <button class="overlay-btn" @click=${() => this._closeClip()} title=${t.close || "Schließen"}>
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+        </div>
+      `;
+    }
+    const e = this.cameraEntry || {};
+    const hasHdSd = e.main && e.sub && e.main !== e.sub;
+    const cfg = this.cardConfig || {};
+    const showLiveControls = cfg.live_controls !== false;
+    const liveControlsPos = cfg.live_controls_position === "top" ? "top" : "bottom";
+    const showHdSd = cfg.hd_sd_button !== false;
+    const hdSdPos = cfg.hd_sd_button_position === "bottom" ? "bottom" : "top";
+    return html`
+      <div class="player-wrap live">
+        ${this._loading ? html`<div class="loading">${t.live_connecting || "Verbinde…"}</div>` : ""}
+        ${this._error ? html`<div class="error">${this._error}</div>` : ""}
+        ${this._provider === "mjpeg"
+          ? (this._mjpegSignedUrl
+              ? html`<img class="live-mjpeg" src=${this._mjpegSignedUrl} />`
+              : html`<div class="loading">${t.live_connecting || "…"}</div>`)
+          : html`<video class="player" autoplay playsinline muted controls></video>`}
+        ${showLiveControls ? html`
+          <div class="live-controls live-controls--${liveControlsPos}">
+            <span class="live-cam-name">${name}</span>
+            <span class="live-indicator">
+              <span class="live-dot"></span> LIVE
+              ${this._provider ? html`<span class="live-proto">${this._provider.toUpperCase()}</span>` : ""}
+              <span class="live-proto">${this._isExternal() ? "EXTERN" : "LAN"}</span>
+            </span>
+          </div>
+        ` : ""}
+        ${hasHdSd && showHdSd ? html`
+          <div class="player-top-buttons hd-sd-wrap--${hdSdPos}">
+            <button class="overlay-btn hd-sd-btn" @click=${() => this._toggleHD()} title=${this._isHD ? "HD Stream aktiv" : "SD Stream aktiv"}>
+              <span class="hd-sd-label">${this._isHD ? "HD" : "SD"}</span>
+            </button>
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  static get styles() {
+    return css`
+      :host { display: block; }
+      .player-wrap {
+        position: relative;
+        background: transparent;
+        border-radius: 4px;
+        overflow: hidden;
+        height: auto;
+      }
+      video.player, .live-mjpeg {
+        display: block; width: 100%; height: auto;
+        background: transparent; object-fit: contain;
+      }
+      .loading, .error {
+        position: absolute; inset: 0; display: flex;
+        align-items: center; justify-content: center;
+        color: #fff; font-size: 0.9em; pointer-events: none;
+        background: rgba(0,0,0,0.3);
+      }
+      .error { color: #ff6b6b; background: rgba(0,0,0,0.6); }
+      .live-controls {
+        position: absolute; left: 8px;
+        display: flex; gap: 8px; align-items: center;
+        color: #fff; font-size: 0.82em;
+        background: rgba(0,0,0,0.55);
+        padding: 4px 8px; border-radius: 12px;
+        pointer-events: none;
+      }
+      .live-controls--bottom { bottom: 8px; }
+      .live-controls--top { top: 8px; }
+      .live-indicator { display: flex; align-items: center; gap: 6px; }
+      .live-dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #e53935; display: inline-block;
+        box-shadow: 0 0 6px #e53935;
+        animation: livedot 1.4s infinite ease-in-out;
+      }
+      @keyframes livedot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+      .live-proto {
+        font-size: 0.7em; opacity: 0.7; text-transform: uppercase;
+        border: 1px solid rgba(255,255,255,0.3);
+        padding: 1px 4px; border-radius: 3px;
+      }
+      .player-top-buttons {
+        position: absolute; right: 6px;
+        display: flex; gap: 6px; z-index: 2;
+      }
+      .hd-sd-wrap--top { top: 6px; }
+      .hd-sd-wrap--bottom { bottom: 6px; }
+      .overlay-btn {
+        background: rgba(0,0,0,0.55); color: #fff; border: none;
+        border-radius: 50%; width: 32px; height: 32px;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        --mdc-icon-size: 18px;
+      }
+      .overlay-btn:hover { background: rgba(0,0,0,0.75); }
+      .hd-sd-btn { border-radius: 6px !important; min-width: 36px; }
+      .hd-sd-label { font-weight: 700; font-size: 11px; letter-spacing: 0.5px; line-height: 1; }
+    `;
+  }
+}
+
+if (!customElements.get("frigate-llm-live-tile")) {
+  customElements.define("frigate-llm-live-tile", FrigateLlmLiveTile);
+}
+
+if (!customElements.get("frigate-llm-vision-timeline-card-editor")) {
+  customElements.define(
+    "frigate-llm-vision-timeline-card-editor",
+    FrigateLlmVisionTimelineCardEditor
+  );
+}
+
+if (!customElements.get("frigate-llm-vision-timeline-card")) {
+  customElements.define(
+    "frigate-llm-vision-timeline-card",
+    FrigateLlmVisionTimelineCard
+  );
+}
+
+window.customCards = window.customCards || [];
+if (!window.customCards.some((c) => c.type === "frigate-llm-vision-timeline-card")) {
+  window.customCards.push({
+    type: "frigate-llm-vision-timeline-card",
+    name: "Frigate + LLM Vision Timeline Card",
+    description:
+      "Combined Frigate events timeline with LLM Vision title & description enrichment, bbox snapshots and clip playback.",
+    preview: false,
+  });
+}
+
+console.info(
+  `%c FRIGATE-LLM-VISION-TIMELINE-CARD %c v${CARD_VERSION} `,
+  "color: white; background: #039be5; font-weight: 700;",
+  "color: #039be5; background: white; font-weight: 700;"
+);
