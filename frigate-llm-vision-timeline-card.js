@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.41.0";
+const CARD_VERSION = "0.42.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1026,6 +1026,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     super();
     this._events = [];
     this._llmEvents = [];
+    this._frigateApiById = new Map();
     this._loading = false;
     this._error = null;
     this._activeClip = null;
@@ -1437,12 +1438,16 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     this._loading = true;
     this._error = null;
     try {
-      const [frigateEvents, llmEvents] = await Promise.all([
+      const [frigateEvents, llmEvents, frigateApiEvents] = await Promise.all([
         this._fetchFrigateEvents(),
         this._config.llm_vision ? this._fetchLlmVisionEvents() : Promise.resolve([]),
+        this._fetchFrigateApiEvents(),
       ]);
       if (token !== this._fetchToken) return;
       this._llmEvents = llmEvents || [];
+      this._frigateApiById = new Map(
+        (frigateApiEvents || []).map((e) => [e.id, e])
+      );
       this._events = this._enrichEvents(frigateEvents);
       this._checkHashForClip();
     } catch (e) {
@@ -1613,6 +1618,42 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     }
   }
 
+  async _fetchFrigateApiEvents() {
+    const base = this._config?.frigate_url;
+    if (!base) return [];
+    try {
+      const targetCams = this._getTargetCameras();
+      const params = new URLSearchParams();
+      params.set("limit", "200");
+      params.set("has_clip", "1");
+      const after = Math.floor((Date.now() - 7 * 24 * 3600 * 1000) / 1000);
+      params.set("after", String(after));
+      if (Array.isArray(targetCams) && targetCams.length) {
+        params.set("cameras", targetCams.join(","));
+      }
+      const url = `${base.replace(/\/+$/, "")}/api/events?${params.toString()}`;
+      const resp = await fetch(url, { method: "GET" });
+      if (!resp.ok) {
+        console.warn(
+          `[FrigateLLMCard] Frigate /api/events HTTP ${resp.status} (ignored)`
+        );
+        return [];
+      }
+      const data = await resp.json();
+      const items = Array.isArray(data) ? data : [];
+      return items.map((e) => ({
+        id: e.id || "",
+        camera: e.camera || "",
+        label: e.label || "",
+        subLabel: e.sub_label || "",
+        description: (e?.data?.description || "").trim(),
+      }));
+    } catch (e) {
+      console.warn("[FrigateLLMCard] Frigate /api/events fetch failed (ignored):", e);
+      return [];
+    }
+  }
+
   async _fetchLlmVisionEvents() {
     try {
       const data = await this.hass.callApi(
@@ -1636,6 +1677,12 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _enrichEvents(frigateEvents) {
+    if (this._frigateApiById?.size) {
+      for (const ev of frigateEvents) {
+        const f = this._frigateApiById.get(ev._eventId);
+        if (f) ev._frigate = f;
+      }
+    }
     if (this._llmEvents?.length) {
       const TOL = 90 * 1000;
       for (const ev of frigateEvents) {
@@ -3201,11 +3248,8 @@ class FrigateLlmVisionTimelineCard extends LitElement {
 
   _renderTimelineMarkerCard(ev, lang) {
     const t = this._t;
-    const titleText =
-      translateLlmTitle(ev._llm?.title, lang) ||
-      translateLabel(ev._label, lang) ||
-      t.event_label;
-    const fullDesc = ev._llm?.description || "";
+    const titleText = this._eventTitle(ev, lang, t);
+    const fullDesc = this._eventFullDesc(ev);
     const description = this._shortDesc(fullDesc);
     const camera = ev._camera;
     const rawLabel = ev._llm?.label || ev._label || "";
@@ -3664,14 +3708,27 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     return m ? m[0].trim() : text.substring(0, 120);
   }
 
+  _eventTitle(ev, lang, t) {
+    const fSub = ev._frigate?.subLabel || "";
+    const fDescTitle = !fSub ? this._shortDesc(ev._frigate?.description || "") : "";
+    return (
+      fSub ||
+      fDescTitle ||
+      translateLlmTitle(ev._llm?.title, lang) ||
+      translateLabel(ev._label, lang) ||
+      t.event_label
+    );
+  }
+
+  _eventFullDesc(ev) {
+    return ev._frigate?.description || ev._llm?.description || "";
+  }
+
   _renderRow(ev) {
     const t = this._t;
     const lang = detectLang(this.hass, this._config?.language);
-    const title =
-      translateLlmTitle(ev._llm?.title, lang) ||
-      translateLabel(ev._label, lang) ||
-      t.event_label;
-    const fullDesc = ev._llm?.description || "";
+    const title = this._eventTitle(ev, lang, t);
+    const fullDesc = this._eventFullDesc(ev);
     const description = this._shortDesc(fullDesc);
     const camera = ev._camera;
     const rawLabel = ev._llm?.label || ev._label || "";
@@ -3728,11 +3785,8 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const t = this._t;
     const lang = detectLang(this.hass, this._config?.language);
     const ev = this._lightbox.ev;
-    const lbTitle =
-      translateLlmTitle(ev._llm?.title, lang) ||
-      translateLabel(ev._label, lang) ||
-      t.event_label;
-    const lbDesc = ev._llm?.description || "";
+    const lbTitle = this._eventTitle(ev, lang, t);
+    const lbDesc = this._eventFullDesc(ev);
     const lbLabel = translateLabel(ev._llm?.label || ev._label || "", lang);
     const lbTime = formatTime(ev._ts, t);
     const lbCam = ev._camera;
