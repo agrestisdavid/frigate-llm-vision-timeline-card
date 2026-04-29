@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.30.0-local70";
+const CARD_VERSION = "0.31.0-local1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1017,6 +1017,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       _timelineZoomCenter: { state: true },
       _timelineCurrentSegment: { state: true },
       _timelineManifestPath: { state: true },
+      _timelineSelected: { state: true },
     };
   }
 
@@ -1068,6 +1069,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     this._timelineZoomCenter = 0;
     this._timelineCurrentSegment = null;
     this._timelineManifestPath = null;
+    this._timelineSelected = false;
   }
 
   connectedCallback() {
@@ -1367,7 +1369,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     if (changed.has("hass") && this.hass && !this._hasFetchedOnce && !this._loading) {
       this._hasFetchedOnce = true;
       this._fetchAll();
-      if (this._config.view_mode !== "timeline"
+      const inTimelineMode = this._config.view_mode === "timeline";
+      // Timeline-Mode mit unausgewählter Position verhält sich wie Events-Ansicht (Live)
+      const allowAutoLive = !this._config.multiview
+        && (!inTimelineMode || !this._timelineSelected);
+      if (allowAutoLive
           && this._config.live_autostart
           && !this._liveMode
           && !this._liveAutostarted) {
@@ -1381,9 +1387,17 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     }
     if (this._config?.view_mode === "timeline") {
       const desiredCam = this._resolveTimelineCamera();
-      // Initialise only when camera actually changes; avoids reinit-loop on HLS errors
-      if (desiredCam && desiredCam !== this._timelineCamera) {
-        this._initTimeline();
+      if (desiredCam) {
+        const camChanged = desiredCam !== this._timelineCamera;
+        // Lazy-Reinit: VoD-Player erst laden, wenn eine Position ausgewählt ist
+        // und kein Clip im Vordergrund läuft (z.B. nach Clip schließen).
+        const needsVodLoad = this._timelineSelected
+          && !this._activeClip
+          && !this._timelineHls
+          && !this._timelineLoading;
+        if (camChanged || needsVodLoad) {
+          this._initTimeline();
+        }
       }
     } else if (this._timelineHls) {
       this._cleanupTimeline();
@@ -2251,7 +2265,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   async _initTimeline() {
     if (this._config?.view_mode !== "timeline") return;
     this._closeClip();
-    if (this._liveMode) this._closeLive();
     const cam = this._resolveTimelineCamera();
     if (!cam) {
       this._timelineError = this._t.timeline_no_camera;
@@ -2261,11 +2274,41 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const camChanged = this._timelineCamera !== cam;
     this._timelineCamera = cam;
     this._computeTimelineRange();
+
+    // Wenn keine Position/Stunde ausgewählt: Live-Ansicht (wie Events-Ansicht).
+    if (!this._timelineSelected) {
+      if (this._timelineHls) this._cleanupTimeline();
+      return;
+    }
+
+    // Position ausgewählt → HLS-Player für die Zielstunde laden.
     if (!camChanged && this._timelineHls) return;
     this._cleanupTimeline();
-    // Default load: the current hour, seek towards live edge.
-    const hour = this._hourStartMs(Date.now());
-    await this._loadTimelineHour(hour, null);
+    const hour = this._timelineHourStart || this._hourStartMs(Date.now());
+    const seekMs = this._timelinePendingSeekSec != null
+      ? hour + this._timelinePendingSeekSec * 1000
+      : null;
+    await this._loadTimelineHour(hour, seekMs);
+  }
+
+  _setTimelineSelected(selected) {
+    const next = !!selected;
+    if (this._timelineSelected === next) return;
+    this._timelineSelected = next;
+    if (next) {
+      // User hat eine Position gewählt → Live verlassen
+      if (this._liveMode) this._closeLive();
+    } else {
+      // Zurück zur Live-Ansicht
+      this._cleanupTimeline();
+      this._timelineHourStart = 0;
+      this._timelinePendingSeekSec = null;
+      this._timelinePlayerTime = 0;
+      if (this._config?.live_autostart && !this._liveMode) {
+        const liveCam = this._resolveLiveCamera();
+        if (liveCam) this._openLive(liveCam);
+      }
+    }
   }
 
   async _loadTimelineHour(hourStartMs, seekTimestampMs) {
@@ -2518,6 +2561,8 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     if (!target) return;
     // Switch back to VoD if a single clip was active
     if (this._activeClip) this._closeClip();
+    // Auswahl gesetzt → wechselt von Live zur Timeline-Ansicht
+    this._setTimelineSelected(true);
     const rect = target.getBoundingClientRect();
     const isVertical = target.classList.contains("timeline-vertical");
     const ratio = isVertical
@@ -2527,6 +2572,21 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     const visible = this._timelineVisibleRange();
     const ts = visible.start + clamped * (visible.end - visible.start);
     this._seekTimelineTo(ts);
+  }
+
+  _onTimelineMarkerClick(ev) {
+    // Stunde + Offset für VoD nach dem Schließen des Clips merken
+    if (ev?._ts) {
+      const ts = ev._ts.getTime();
+      this._timelineHourStart = this._hourStartMs(ts);
+      this._timelinePendingSeekSec = (ts - this._timelineHourStart) / 1000;
+    }
+    this._setTimelineSelected(true);
+    this._openClip(ev);
+  }
+
+  _closeTimelineSelection() {
+    this._setTimelineSelected(false);
   }
 
   _cleanupTimeline() {
@@ -2782,8 +2842,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
 
   _renderLeftPanel() {
     if (this._config.view_mode === "timeline") {
-      // Marker click loads the single clip; track scrubbing keeps VoD recording
+      // Clip aktiv → Clip-Player (wie bisher)
       if (this._activeClip) return this._renderPlayer();
+      // Keine Stunde/Position ausgewählt → Live-Ansicht (wie Events-Ansicht)
+      if (!this._timelineSelected) return this._renderPlayer();
+      // Auswahl aktiv → VoD-Player
       return this._renderTimelinePlayer();
     }
     if (this._config.multiview) return this._renderMultiview();
@@ -2813,10 +2876,16 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         ${this._timelineLoading ? html`<div class="loading">${t.timeline_loading}</div>` : ""}
         ${this._timelineError ? html`<div class="error">${this._timelineError}</div>` : ""}
         <video class="timeline-player" playsinline controls preload="metadata"></video>
-        <div class="timeline-cam-badge">
-          <ha-icon icon="mdi:cctv"></ha-icon>
-          <span>${this._camName(cam)}</span>
-          ${wallClock ? html`<span class="timeline-wallclock">${wallClock}</span>` : ""}
+        ${wallClock ? html`
+          <div class="timeline-cam-badge">
+            <ha-icon icon="mdi:clock-outline"></ha-icon>
+            <span class="timeline-wallclock">${wallClock}</span>
+          </div>
+        ` : ""}
+        <div class="player-top-buttons">
+          <button class="overlay-btn" @click=${() => this._closeTimelineSelection()} title="${t.close}">
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
         </div>
       </div>
       ${this._timelineManifestPath || this._timelineCurrentSegment
@@ -2986,7 +3055,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       translateLlmTitle(ev._llm?.title, lang) || labelText || t.event_label;
     const timeText = formatTime(ev._ts, t);
     const description = ev._llm?.description || "";
-    const tooltipTitleAttr = `${timeText} · ${labelText || t.event_label}`;
     const styleParts = [];
     styleParts.push(isSplit ? `top: ${pos}%;` : `left: ${pos}%;`);
     if (color) styleParts.push(`--marker-color: ${color};`);
@@ -2994,23 +3062,21 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       <div
         class="timeline-marker"
         style=${styleParts.join(" ")}
-        title=${tooltipTitleAttr}
         @pointerdown=${(e) => e.stopPropagation()}
-        @click=${(e) => { e.stopPropagation(); this._openClip(ev); }}
+        @click=${(e) => { e.stopPropagation(); this._onTimelineMarkerClick(ev); }}
       >
         <div class="timeline-marker-thumb">
           ${snapUrl
             ? html`<img class="timeline-marker-img" src=${snapUrl} loading="lazy" @error=${(e) => { e.target.style.display = "none"; e.target.parentElement?.classList.add("placeholder"); }} />`
             : html`<div class="timeline-marker-img placeholder"></div>`}
+          ${icon ? html`<ha-icon class="timeline-marker-icon" icon=${icon}></ha-icon>` : ""}
         </div>
-        ${icon ? html`<ha-icon class="timeline-marker-icon" icon=${icon}></ha-icon>` : ""}
-        <div class="timeline-marker-tooltip">
-          <div class="timeline-marker-tooltip-title">${titleText}</div>
-          <div class="timeline-marker-tooltip-meta">
-            ${timeText}${labelText ? ` · ${labelText}` : ""}
-          </div>
+        <div class="timeline-marker-info">
+          ${labelText ? html`<div class="timeline-marker-label">${labelText}</div>` : ""}
+          <div class="timeline-marker-title">${titleText}</div>
+          <div class="timeline-marker-time">${timeText}</div>
           ${description
-            ? html`<div class="timeline-marker-tooltip-desc">${this._shortDesc(description)}</div>`
+            ? html`<div class="timeline-marker-desc">${this._shortDesc(description)}</div>`
             : ""}
         </div>
       </div>
@@ -4380,8 +4446,8 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
       .timeline-marker-lane.timeline-horizontal {
         border-radius: 0 0 8px 8px;
-        height: 80px;
-        flex: 0 0 80px;
+        height: 96px;
+        flex: 0 0 96px;
       }
       .timeline-marker-lane.timeline-vertical {
         border-radius: 0 8px 8px 0;
@@ -4447,20 +4513,23 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         position: absolute;
         --marker-color: var(--accent);
         z-index: 2;
-        width: 36px;
-        height: 36px;
+        display: flex;
+        gap: 8px;
+        align-items: stretch;
+        padding: 4px;
+        background: color-mix(in srgb, var(--text-primary) 6%, #1a1a1a);
+        border: 1px solid var(--marker-color);
         border-radius: 6px;
-        overflow: visible;
-        border: 2px solid var(--marker-color);
-        background: #111;
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
         cursor: pointer;
         transition: transform 100ms ease, box-shadow 100ms ease;
+        overflow: hidden;
       }
       .timeline-marker-thumb {
         position: relative;
-        width: 100%;
-        height: 100%;
+        flex: 0 0 auto;
+        width: 64px;
+        height: 64px;
         overflow: hidden;
         border-radius: 4px;
         background: #111;
@@ -4475,6 +4544,44 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       .timeline-marker-img.placeholder {
         background: linear-gradient(135deg, #333, #555);
       }
+      .timeline-marker-info {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 2px 4px 2px 0;
+        font-size: 0.78em;
+        line-height: 1.3;
+        color: var(--text-primary);
+      }
+      .timeline-marker-label {
+        font-size: 0.72em;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--marker-color);
+        font-weight: 700;
+      }
+      .timeline-marker-title {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .timeline-marker-time {
+        font-size: 0.85em;
+        color: var(--text-secondary);
+        font-variant-numeric: tabular-nums;
+      }
+      .timeline-marker-desc {
+        margin-top: 2px;
+        font-size: 0.8em;
+        color: var(--text-secondary);
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
       /* Connecting line from marker to its exact moment on the axis */
       .timeline-marker::before {
         content: "";
@@ -4484,75 +4591,41 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
       /* Markers live inside .timeline-marker-lane and are positioned by left/top % */
       .timeline-marker-lane.timeline-horizontal .timeline-marker {
-        top: 22px;
+        top: 14px;
         transform: translateX(-50%);
+        width: 220px;
+        max-width: 220px;
       }
       .timeline-marker-lane.timeline-horizontal .timeline-marker::before {
         left: 50%;
         bottom: 100%;
         width: 2px;
-        height: 22px;
+        height: 14px;
         transform: translateX(-50%);
       }
       .timeline-marker-lane.timeline-horizontal .timeline-marker:hover {
-        transform: translateX(-50%) scale(1.15);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        transform: translateX(-50%) scale(1.03);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
         z-index: 4;
       }
       .timeline-marker-lane.timeline-vertical .timeline-marker {
-        left: 22px;
+        left: 14px;
         transform: translateY(-50%);
+        width: calc(100% - 22px);
+        max-width: 280px;
       }
       .timeline-marker-lane.timeline-vertical .timeline-marker::before {
         top: 50%;
         right: 100%;
         height: 2px;
-        width: 22px;
+        width: 14px;
         transform: translateY(-50%);
       }
       .timeline-marker-lane.timeline-vertical .timeline-marker:hover {
-        transform: translateY(-50%) scale(1.15);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+        transform: translateY(-50%) scale(1.02);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
         z-index: 4;
       }
-
-      .timeline-marker-tooltip {
-        position: absolute;
-        background: rgba(0, 0, 0, 0.92);
-        color: #fff;
-        padding: 8px 12px;
-        border-radius: 6px;
-        font-size: 0.8em;
-        line-height: 1.35;
-        min-width: 180px;
-        max-width: 260px;
-        white-space: normal;
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-        z-index: 10;
-        transition: opacity 100ms ease;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-      }
-      .timeline-marker-lane.timeline-horizontal .timeline-marker-tooltip {
-        top: 100%;
-        left: 50%;
-        transform: translateX(-50%);
-        margin-top: 10px;
-      }
-      .timeline-marker-lane.timeline-vertical .timeline-marker-tooltip {
-        top: 50%;
-        left: 100%;
-        transform: translateY(-50%);
-        margin-left: 10px;
-      }
-      .timeline-marker:hover .timeline-marker-tooltip {
-        opacity: 1;
-        visibility: visible;
-      }
-      .timeline-marker-tooltip-title { font-weight: 600; margin-bottom: 2px; }
-      .timeline-marker-tooltip-meta { opacity: 0.8; margin-bottom: 4px; }
-      .timeline-marker-tooltip-desc { opacity: 0.95; }
 
       .timeline-debug {
         margin-top: 6px;
@@ -4580,19 +4653,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         white-space: nowrap;
         word-break: break-all;
       }
-      .timeline-marker-img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-      }
-      .timeline-marker-img.placeholder {
-        background: linear-gradient(135deg, #333, #555);
-      }
       .timeline-marker-icon {
         position: absolute;
-        bottom: -2px;
-        right: -2px;
+        bottom: 2px;
+        right: 2px;
         --mdc-icon-size: 14px;
         background: var(--marker-color);
         color: #fff;
