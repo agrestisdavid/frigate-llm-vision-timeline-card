@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.36.1";
+const CARD_VERSION = "0.37.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -2881,13 +2881,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         </div>
       `;
     }
-    let wallClock = null;
-    if (this._timelineHourStart) {
-      const absMs = this._timelineHourStart + (this._timelinePlayerTime || 0) * 1000;
-      const d = new Date(absMs);
-      const pad = (n) => String(n).padStart(2, "0");
-      wallClock = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(Math.floor(d.getSeconds()))}`;
-    }
+    const wallClock = this._timelineHourStart ? this._formatWallClock() : null;
     return html`
       <div class="player-wrap timeline-player-wrap">
         ${this._timelineLoading ? html`<div class="loading">${t.timeline_loading}</div>` : ""}
@@ -3004,6 +2998,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
             @pointercancel=${(e) => this._onTimelinePointerCancel(e)}
             @wheel=${(e) => this._onTimelineWheel(e)}
           >
+            <div class="timeline-axis-line"></div>
             <div class="timeline-axis">
               ${ticks.map((tk) => html`
                 <div
@@ -3016,11 +3011,28 @@ class FrigateLlmVisionTimelineCard extends LitElement {
                 </div>
               `)}
             </div>
+            <div class="timeline-event-marks">
+              ${visibleEvents.map((ev) => {
+                const ts = ev._ts.getTime();
+                const pos = ((ts - start) / span) * 100;
+                const rawLabel = ev._llm?.label || ev._label || "";
+                const color = labelColor(rawLabel, this._config?.label_colors);
+                const styleParts = [
+                  isSplit ? `top: ${pos}%` : `left: ${pos}%`,
+                ];
+                if (color) styleParts.push(`--bar-color: ${color}`);
+                return html`<div class="timeline-event-mark" style=${styleParts.join("; ")}></div>`;
+              })}
+            </div>
             ${indicatorPos != null
               ? html`<div
                   class="timeline-indicator"
                   style=${isSplit ? `top: ${indicatorPos}%;` : `left: ${indicatorPos}%;`}
-                ></div>`
+                >
+                  ${this._timelineHourStart
+                    ? html`<span class="timeline-indicator-time">${this._formatWallClock()}</span>`
+                    : ""}
+                </div>`
               : ""}
           </div>
           <div class="timeline-marker-lane timeline-${orientation}">
@@ -3088,40 +3100,58 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     return clusters;
   }
 
+  _formatWallClock() {
+    if (!this._timelineHourStart) return "";
+    const absMs = this._timelineHourStart + (this._timelinePlayerTime || 0) * 1000;
+    const d = new Date(absMs);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(Math.floor(d.getSeconds()))}`;
+  }
+
   _renderTimelineMarkerCard(ev, lang) {
     const t = this._t;
-    const snapUrl = this._snapshotUrl(ev);
+    const titleText =
+      translateLlmTitle(ev._llm?.title, lang) ||
+      translateLabel(ev._label, lang) ||
+      t.event_label;
+    const fullDesc = ev._llm?.description || "";
+    const description = this._shortDesc(fullDesc);
+    const camera = ev._camera;
     const rawLabel = ev._llm?.label || ev._label || "";
     const labelText = translateLabel(rawLabel, lang);
-    const titleText =
-      translateLlmTitle(ev._llm?.title, lang) || labelText || t.event_label;
-    const timeText = formatTime(ev._ts, t);
-    const description = ev._llm?.description || "";
-    const color = labelColor(rawLabel, this._config?.label_colors);
-    const colorStyle = color ? `--marker-color: ${color};` : "";
+    const chip = this._renderLabelChip(rawLabel, labelText);
+    const timeStr = formatTime(ev._ts, t);
+    const snapUrl = this._snapshotUrl(ev);
+    const isActive =
+      this._activeClip &&
+      this._activeClip.media_content_id === ev.media_content_id;
     return html`
       <div
-        class="timeline-marker"
-        style=${colorStyle}
+        class="row timeline-row ${isActive ? "active" : ""}"
         @pointerdown=${(e) => e.stopPropagation()}
-        @click=${(e) => { e.stopPropagation(); this._onTimelineMarkerClick(ev); }}
       >
-        <div class="timeline-marker-thumb">
-          ${snapUrl
-            ? html`<img class="timeline-marker-img" src=${snapUrl} loading="lazy" @error=${(e) => { e.target.style.display = "none"; e.target.parentElement?.classList.add("placeholder"); }} />`
-            : html`<div class="timeline-marker-img placeholder"></div>`}
+        <div
+          class="text"
+          @click=${(e) => { e.stopPropagation(); this._onTimelineMarkerClick(ev); }}
+        >
+          <div class="title-line">
+            <span class="row-title">${titleText}</span>
+            ${chip}
+          </div>
+          <div class="meta">
+            ${timeStr}${camera ? html` · <span class="cam">${this._camName(camera)}</span>` : ""}
+          </div>
+          ${description
+            ? html`<div class="desc">${description}</div>`
+            : html`<div class="desc placeholder">${t.no_llm}</div>`}
         </div>
-        <div class="timeline-marker-info">
-          <div class="timeline-marker-info-top">
-            <span class="timeline-marker-title">${titleText}</span>
-            ${labelText ? this._renderLabelChip(rawLabel, labelText) : ""}
-          </div>
-          <div class="timeline-marker-meta">
-            <span class="timeline-marker-time">${timeText}</span>
-            ${description
-              ? html`<span class="timeline-marker-desc"> · ${this._shortDesc(description)}</span>`
-              : ""}
-          </div>
+        <div class="snap" @click=${(e) => {
+          e.stopPropagation();
+          this._openLightbox(ev, snapUrl);
+        }}>
+          ${snapUrl
+            ? html`<img src="${snapUrl}" loading="lazy" alt="snapshot" @error=${(e) => (e.target.style.opacity = "0.3")} />`
+            : html`<div class="noimg"><ha-icon icon="mdi:image-off"></ha-icon></div>`}
         </div>
       </div>
     `;
@@ -4538,10 +4568,11 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         border-radius: 8px 8px 0 0;
       }
       .timeline-track.timeline-vertical {
-        width: 60px;
-        min-width: 60px;
-        flex: 0 0 60px;
+        width: 72px;
+        min-width: 72px;
+        flex: 0 0 72px;
         border-radius: 8px 0 0 8px;
+        overflow: visible;
       }
 
       /* Marker lane: visual only, marker clicks open clip */
@@ -4567,6 +4598,51 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         inset: 0;
         pointer-events: none;
       }
+      /* Continuous vertical axis line through the center of the track */
+      .timeline-axis-line {
+        position: absolute;
+        background: color-mix(in srgb, var(--text-secondary, #888) 40%, transparent);
+        pointer-events: none;
+      }
+      .timeline-track.timeline-vertical .timeline-axis-line {
+        top: 0;
+        bottom: 0;
+        left: 50%;
+        width: 2px;
+        transform: translateX(-50%);
+      }
+      .timeline-track.timeline-horizontal .timeline-axis-line {
+        left: 0;
+        right: 0;
+        top: 50%;
+        height: 2px;
+        transform: translateY(-50%);
+      }
+      /* Event markers — short bars crossing the axis line at event positions */
+      .timeline-event-marks {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+      }
+      .timeline-event-mark {
+        position: absolute;
+        --bar-color: #facc15;
+        background: var(--bar-color);
+        border-radius: 1px;
+        opacity: 0.9;
+      }
+      .timeline-track.timeline-vertical .timeline-event-mark {
+        left: 50%;
+        height: 2px;
+        width: 18px;
+        transform: translate(-50%, -50%);
+      }
+      .timeline-track.timeline-horizontal .timeline-event-mark {
+        top: 50%;
+        width: 2px;
+        height: 18px;
+        transform: translate(-50%, -50%);
+      }
       .timeline-tick {
         position: absolute;
         font-size: 0.7em;
@@ -4587,36 +4663,63 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         white-space: nowrap;
       }
       .timeline-vertical .timeline-tick {
-        left: 0;
-        right: 0;
-        transform: translateY(-50%);
+        left: 50%;
+        width: 10px;
+        transform: translate(-100%, -50%);
         height: 1px;
-        background: color-mix(in srgb, var(--text-secondary) 25%, transparent);
+        background: color-mix(in srgb, var(--text-secondary) 35%, transparent);
       }
       .timeline-vertical .timeline-tick-label {
         position: absolute;
-        left: 4px;
-        top: 2px;
+        right: calc(100% + 4px);
+        top: 50%;
+        transform: translateY(-50%);
+        font-size: 0.66em;
         white-space: nowrap;
+        color: var(--text-secondary);
       }
       .timeline-indicator {
         position: absolute;
-        background: var(--accent);
-        z-index: 3;
+        background: #ef4444;
+        z-index: 5;
         pointer-events: none;
-        box-shadow: 0 0 6px var(--accent);
+        box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
       }
       .timeline-horizontal .timeline-indicator {
-        top: 0;
-        bottom: 0;
-        width: 2px;
-        transform: translateX(-1px);
+        top: -4px;
+        bottom: -4px;
+        width: 3px;
+        transform: translateX(-1.5px);
       }
       .timeline-vertical .timeline-indicator {
-        left: 0;
-        right: 0;
-        height: 2px;
-        transform: translateY(-1px);
+        left: -8px;
+        right: -8px;
+        height: 3px;
+        transform: translateY(-1.5px);
+      }
+      .timeline-indicator-time {
+        position: absolute;
+        background: rgba(0, 0, 0, 0.85);
+        color: #fff;
+        font-size: 0.74em;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        padding: 3px 7px;
+        border-radius: 4px;
+        white-space: nowrap;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+      }
+      .timeline-vertical .timeline-indicator-time {
+        left: 50%;
+        top: 100%;
+        margin-top: 5px;
+        transform: translateX(-50%);
+      }
+      .timeline-horizontal .timeline-indicator-time {
+        top: 100%;
+        left: 50%;
+        margin-top: 5px;
+        transform: translateX(-50%);
       }
       .timeline-marker {
         --marker-color: var(--accent);
@@ -4735,29 +4838,35 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         transform: translateY(-50%);
         width: calc(100% - 22px);
       }
-      /* Connecting line — drawn on the wrapper so cluster stacks share one line */
-      .timeline-marker-pos::before,
-      .timeline-cluster::before {
-        content: "";
-        position: absolute;
-        background: color-mix(in srgb, var(--marker-color, var(--accent)) 70%, transparent);
-        z-index: 0;
+      /* No connection line — event marks on the axis already establish the
+         visual link between card position and timeline moment. */
+
+      /* Row-style cards inside the timeline lane (look like the events list) */
+      .timeline-marker-pos > .row,
+      .timeline-cluster-item > .row {
+        margin: 0;
+        width: 100%;
+        background: var(--ha-card-background, var(--card-background-color, #fff));
+        border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.2));
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        box-sizing: border-box;
       }
-      .timeline-marker-lane.timeline-horizontal .timeline-marker-pos::before,
-      .timeline-marker-lane.timeline-horizontal .timeline-cluster::before {
-        left: 50%;
-        bottom: 100%;
-        width: 2px;
-        height: 14px;
-        transform: translateX(-50%);
+      .timeline-marker-pos > .row:hover,
+      .timeline-cluster-item > .row:hover {
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--divider-color));
       }
-      .timeline-marker-lane.timeline-vertical .timeline-marker-pos::before,
-      .timeline-marker-lane.timeline-vertical .timeline-cluster::before {
-        top: 50%;
-        right: 100%;
-        height: 2px;
-        width: 14px;
-        transform: translateY(-50%);
+      /* Smaller snap thumbnail in lane to fit narrower lanes */
+      .timeline-marker-lane .row .snap {
+        flex: 0 0 84px;
+        width: 84px;
+        height: 64px;
+      }
+      .timeline-marker-lane .row .desc {
+        font-size: 0.82em;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
       /* Single-marker hover lift */
       .timeline-marker-lane.timeline-horizontal .timeline-marker-pos:hover {
