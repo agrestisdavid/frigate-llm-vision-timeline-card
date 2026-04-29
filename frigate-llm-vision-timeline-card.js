@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.35.0";
+const CARD_VERSION = "0.35.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1191,9 +1191,6 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _isSplitLayout() {
-    // Timeline view always uses split (vertical timeline) — horizontal axis is
-    // too cramped for hour-based marker reading.
-    if (this._config?.view_mode === "timeline") return true;
     const lay = this._config?.multiview
       ? (this._config.multiview_layout || "auto")
       : (this._config?.layout ?? "auto");
@@ -2912,12 +2909,15 @@ class FrigateLlmVisionTimelineCard extends LitElement {
     `;
   }
 
-  _renderTimeline(isSplit) {
+  _renderTimeline(_isSplit) {
     const t = this._t;
     const cam = this._timelineCamera;
     const events = this._timelineEvents();
     const lang = detectLang(this.hass, this._config?.language);
-    const orientation = isSplit ? "vertical" : "horizontal";
+    // Timeline orientation is always vertical — horizontal axis was too cramped.
+    // The card layout (split/stacked) still controls where the timeline lives.
+    const isSplit = true;
+    const orientation = "vertical";
     const visible = this._timelineVisibleRange();
     const start = visible.start;
     const end = visible.end;
@@ -4419,6 +4419,12 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         overflow: hidden;
         padding: 8px;
         box-sizing: border-box;
+      }
+      /* In stacked layout the timeline still wants room for a 24h vertical
+         axis — give it a sensible minimum so it doesn't collapse to a
+         100px-strip under the player */
+      .split.is-stacked > .right .timeline-wrap {
+        min-height: 360px;
       }
       .timeline-wrap.timeline-vertical {
         flex-direction: column;
