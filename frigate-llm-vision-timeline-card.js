@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.5";
+const CARD_VERSION = "0.42.6";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1630,34 +1630,79 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         after,
       };
       console.info("[FrigateLLMCard] Frigate events WS query:", msg);
-      const raw = await this.hass.callWS(msg);
-      const items =
-        typeof raw === "string"
-          ? JSON.parse(raw)
-          : Array.isArray(raw)
-          ? raw
-          : [];
+      const [rawEvents, rawReviews] = await Promise.all([
+        this.hass.callWS(msg),
+        this.hass
+          .callWS({
+            type: "frigate/reviews/get",
+            instance_id: msg.instance_id,
+            limit: 200,
+            after,
+          })
+          .catch((e) => {
+            console.warn(
+              "[FrigateLLMCard] Frigate reviews WS fetch failed (ignored):",
+              e
+            );
+            return [];
+          }),
+      ]);
+      const items = this._parseFrigateWsArray(rawEvents);
+      const reviews = this._parseFrigateWsArray(rawReviews);
       console.info(
-        `[FrigateLLMCard] Frigate events WS returned ${items.length} items`,
-        items[0] ? { sample: items[0] } : ""
+        `[FrigateLLMCard] Frigate WS returned ${items.length} events, ${reviews.length} reviews`,
+        items[0] ? { eventSample: items[0] } : "",
+        reviews[0] ? { reviewSample: reviews[0] } : ""
       );
-      const mapped = items.map((e) => ({
-        id: e.id || "",
-        camera: e.camera || "",
-        label: e.label || "",
-        subLabel: e.sub_label || "",
-        description: (e?.data?.description || "").trim(),
-      }));
+
+      const eventToReviewDesc = new Map();
+      for (const r of reviews) {
+        const rData =
+          typeof r?.data === "string" ? JSON.parse(r.data || "{}") : r?.data || {};
+        const desc =
+          (rData?.metadata?.scene_description ||
+            rData?.metadata?.description ||
+            r?.description ||
+            "").trim();
+        if (!desc) continue;
+        const detections = rData?.detections || rData?.events || [];
+        for (const eid of detections) {
+          if (!eventToReviewDesc.has(eid)) eventToReviewDesc.set(eid, desc);
+        }
+      }
+
+      const mapped = items.map((e) => {
+        const eventDesc = (e?.data?.description || "").trim();
+        return {
+          id: e.id || "",
+          camera: e.camera || "",
+          label: e.label || "",
+          subLabel: e.sub_label || "",
+          description: eventDesc || eventToReviewDesc.get(e.id) || "",
+        };
+      });
       const withSub = mapped.filter((m) => m.subLabel).length;
       const withDesc = mapped.filter((m) => m.description).length;
       console.info(
-        `[FrigateLLMCard] Frigate enriched: ${mapped.length} events, ${withSub} with sub_label, ${withDesc} with description`
+        `[FrigateLLMCard] Frigate enriched: ${mapped.length} events, ${withSub} with sub_label, ${withDesc} with description (review-derived: ${eventToReviewDesc.size} event ids)`
       );
       return mapped;
     } catch (e) {
       console.warn("[FrigateLLMCard] Frigate events WS fetch failed (ignored):", e);
       return [];
     }
+  }
+
+  _parseFrigateWsArray(raw) {
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return Array.isArray(raw) ? raw : [];
   }
 
   async _fetchLlmVisionEvents() {
