@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.37.0";
+const CARD_VERSION = "0.37.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -4568,9 +4568,9 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         border-radius: 8px 8px 0 0;
       }
       .timeline-track.timeline-vertical {
-        width: 72px;
-        min-width: 72px;
-        flex: 0 0 72px;
+        width: 88px;
+        min-width: 88px;
+        flex: 0 0 88px;
         border-radius: 8px 0 0 8px;
         overflow: visible;
       }
@@ -4671,12 +4671,14 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
       .timeline-vertical .timeline-tick-label {
         position: absolute;
-        right: calc(100% + 4px);
+        right: calc(100% + 5px);
         top: 50%;
         transform: translateY(-50%);
-        font-size: 0.66em;
+        font-size: 0.85em;
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
         white-space: nowrap;
-        color: var(--text-secondary);
+        color: var(--text-secondary, var(--secondary-text-color));
       }
       .timeline-indicator {
         position: absolute;
