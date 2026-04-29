@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.7";
+const CARD_VERSION = "0.42.8";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1649,58 +1649,53 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       ]);
       const items = this._parseFrigateWsArray(rawEvents);
       const reviews = this._parseFrigateWsArray(rawReviews);
-      console.info(
-        `[FrigateLLMCard] Frigate WS returned ${items.length} events, ${reviews.length} reviews`
-      );
-      if (items[0]) {
-        console.info(
-          "[FrigateLLMCard] DUMP eventSample:",
-          JSON.stringify(items[0], null, 2)
-        );
-      }
-      if (reviews[0]) {
-        console.info(
-          "[FrigateLLMCard] DUMP reviewSample[0]:",
-          JSON.stringify(reviews[0], null, 2)
-        );
-      }
-      if (reviews[1]) {
-        console.info(
-          "[FrigateLLMCard] DUMP reviewSample[1]:",
-          JSON.stringify(reviews[1], null, 2)
-        );
-      }
-
-      const eventToReviewDesc = new Map();
+      const eventToReview = new Map();
       for (const r of reviews) {
         const rData =
           typeof r?.data === "string" ? JSON.parse(r.data || "{}") : r?.data || {};
-        const desc =
-          (rData?.metadata?.scene_description ||
-            rData?.metadata?.description ||
-            r?.description ||
-            "").trim();
-        if (!desc) continue;
+        const meta = rData?.metadata || {};
+        const reviewMeta = {
+          title: (meta.title || "").trim(),
+          summary: (meta.shortSummary || meta.short_summary || "").trim(),
+          scene: (meta.scene || "").trim(),
+          severity: r?.severity || "",
+          threatLevel:
+            typeof meta.potential_threat_level === "number"
+              ? meta.potential_threat_level
+              : null,
+        };
+        if (
+          !reviewMeta.title &&
+          !reviewMeta.summary &&
+          !reviewMeta.scene
+        )
+          continue;
         const detections = rData?.detections || rData?.events || [];
         for (const eid of detections) {
-          if (!eventToReviewDesc.has(eid)) eventToReviewDesc.set(eid, desc);
+          if (!eventToReview.has(eid)) eventToReview.set(eid, reviewMeta);
         }
       }
 
       const mapped = items.map((e) => {
         const eventDesc = (e?.data?.description || "").trim();
+        const review = eventToReview.get(e.id) || null;
         return {
           id: e.id || "",
           camera: e.camera || "",
           label: e.label || "",
           subLabel: e.sub_label || "",
-          description: eventDesc || eventToReviewDesc.get(e.id) || "",
+          description: eventDesc,
+          reviewTitle: review?.title || "",
+          reviewSummary: review?.summary || "",
+          reviewScene: review?.scene || "",
+          severity: review?.severity || "",
+          threatLevel: review?.threatLevel ?? null,
         };
       });
-      const withSub = mapped.filter((m) => m.subLabel).length;
-      const withDesc = mapped.filter((m) => m.description).length;
+      const withTitle = mapped.filter((m) => m.reviewTitle).length;
+      const withScene = mapped.filter((m) => m.reviewScene).length;
       console.info(
-        `[FrigateLLMCard] Frigate enriched: ${mapped.length} events, ${withSub} with sub_label, ${withDesc} with description (review-derived: ${eventToReviewDesc.size} event ids)`
+        `[FrigateLLMCard] Frigate enriched: ${items.length} events, ${reviews.length} reviews, ${eventToReview.size} event ids covered → ${withTitle} events get a review title, ${withScene} get a scene`
       );
       return mapped;
     } catch (e) {
@@ -3328,8 +3323,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   _renderTimelineMarkerCard(ev, lang) {
     const t = this._t;
     const titleText = this._eventTitle(ev, lang, t);
-    const fullDesc = this._eventFullDesc(ev);
-    const description = this._shortDesc(fullDesc);
+    const description = this._eventShortDesc(ev);
     const camera = ev._camera;
     const rawLabel = ev._llm?.label || ev._label || "";
     const labelText = translateLabel(rawLabel, lang);
@@ -3788,27 +3782,36 @@ class FrigateLlmVisionTimelineCard extends LitElement {
   }
 
   _eventTitle(ev, lang, t) {
-    const fSub = ev._frigate?.subLabel || "";
-    const fDescTitle = !fSub ? this._shortDesc(ev._frigate?.description || "") : "";
     return (
-      fSub ||
-      fDescTitle ||
+      ev._frigate?.reviewTitle ||
+      ev._frigate?.subLabel ||
+      this._shortDesc(ev._frigate?.description || "") ||
       translateLlmTitle(ev._llm?.title, lang) ||
       translateLabel(ev._label, lang) ||
       t.event_label
     );
   }
 
+  _eventShortDesc(ev) {
+    if (ev._frigate?.reviewSummary) return ev._frigate.reviewSummary;
+    return this._shortDesc(this._eventFullDesc(ev));
+  }
+
   _eventFullDesc(ev) {
-    return ev._frigate?.description || ev._llm?.description || "";
+    return (
+      ev._frigate?.reviewScene ||
+      ev._frigate?.reviewSummary ||
+      ev._frigate?.description ||
+      ev._llm?.description ||
+      ""
+    );
   }
 
   _renderRow(ev) {
     const t = this._t;
     const lang = detectLang(this.hass, this._config?.language);
     const title = this._eventTitle(ev, lang, t);
-    const fullDesc = this._eventFullDesc(ev);
-    const description = this._shortDesc(fullDesc);
+    const description = this._eventShortDesc(ev);
     const camera = ev._camera;
     const rawLabel = ev._llm?.label || ev._label || "";
     const label = translateLabel(rawLabel, lang);
