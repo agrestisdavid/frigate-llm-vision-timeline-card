@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.40.1";
+const CARD_VERSION = "0.41.0";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1285,6 +1285,7 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       multiview_columns: Math.max(1, Math.min(4, Number(config.multiview_columns) || 1)),
       view_mode: ["events", "timeline"].includes(config.view_mode) ? config.view_mode : "events",
       timeline_window_hours: Math.max(1, Math.min(168, Number(config.timeline_window_hours) || 24)),
+      timeline_flipped: config.timeline_flipped === true,
     };
     // Timeline + Multiview schließen sich aus — Multiview hat Vorrang
     if (this._config.multiview && this._config.view_mode === "timeline") {
@@ -3098,9 +3099,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
     }
 
+    const flipped = this._config?.timeline_flipped === true;
     return html`
-      <div class="timeline-wrap timeline-${orientation}">
-        <div class="timeline-body timeline-${orientation}">
+      <div class="timeline-wrap timeline-${orientation} ${flipped ? "timeline-flipped" : ""}">
+        <div class="timeline-body timeline-${orientation} ${flipped ? "timeline-flipped" : ""}">
           <div
             class="timeline-track timeline-${orientation}"
             @pointerdown=${(e) => this._onTimelinePointerDown(e)}
@@ -4681,6 +4683,26 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         flex: 0 0 80px;
       }
 
+      /* Flipped layout: events list on the left, axis on the right */
+      .timeline-body.timeline-flipped {
+        flex-direction: row-reverse;
+      }
+      .timeline-flipped .timeline-track.timeline-vertical {
+        border-radius: 0 8px 8px 0;
+      }
+      .timeline-flipped .timeline-event-list {
+        border-radius: 8px 0 0 8px;
+      }
+      /* Mirror the tick: hangs to the right of the axis line */
+      .timeline-flipped .timeline-vertical .timeline-tick {
+        transform: translate(0, -50%);
+      }
+      /* Mirror the label: hangs just right of the axis line, inside the track */
+      .timeline-flipped .timeline-vertical .timeline-tick-label {
+        right: auto;
+        left: 2px;
+      }
+
       /* Event list to the right of the timeline axis (scrollable) */
       .timeline-event-list {
         flex: 1 1 auto;
@@ -4790,7 +4812,10 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       }
       .timeline-vertical .timeline-tick-label {
         position: absolute;
-        right: calc(100% + 6px);
+        /* Label rechts edge sits just left of the axis line (tick's right
+           edge), so the whole label stays inside the track even when the
+           track is narrow. The thin tick line gets covered, which is fine. */
+        right: 2px;
         top: 50%;
         transform: translateY(-50%);
         font-size: 1em;
@@ -5324,6 +5349,12 @@ class FrigateLlmVisionTimelineCardEditor extends LitElement {
           @change=${(e) => this._set("timeline_window_hours", Math.max(1, Math.min(168, Number(e.target.value) || 24)))}
         ></ha-textfield>
         <p class="hint">Zeitraum der Frigate-Aufnahme, der in der Timeline angezeigt wird (rückwirkend ab jetzt).</p>
+        <ha-formfield label="Timeline gespiegelt (Liste links, Achse rechts)">
+          <ha-switch
+            .checked=${cfg.timeline_flipped === true}
+            @change=${(e) => this._set("timeline_flipped", e.target.checked)}
+          ></ha-switch>
+        </ha-formfield>
       ` : ""}
 
       <div class="select-row">
