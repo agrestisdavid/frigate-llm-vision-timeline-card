@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.40.0";
+const CARD_VERSION = "0.40.1";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -4671,13 +4671,14 @@ class FrigateLlmVisionTimelineCard extends LitElement {
         border-radius: 8px 0 0 8px;
         overflow: visible;
       }
-      /* Stacked layout (mobile): keep axis line, ticks and bars the same
-         visual size, just give the track itself less horizontal real estate
-         — labels still fit thanks to overflow: visible. */
+      /* Stacked layout (mobile): same axis line, ticks, bars and label
+         size as split — only the track footprint shrinks. 80px is the
+         narrowest we can go before "HH:00" labels (1em) start spilling
+         past the track on the left side. */
       .split.is-stacked > .right .timeline-track.timeline-vertical {
-        width: 56px;
-        min-width: 56px;
-        flex: 0 0 56px;
+        width: 80px;
+        min-width: 80px;
+        flex: 0 0 80px;
       }
 
       /* Event list to the right of the timeline axis (scrollable) */
