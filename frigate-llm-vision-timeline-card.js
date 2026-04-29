@@ -1,4 +1,4 @@
-const CARD_VERSION = "0.42.6";
+const CARD_VERSION = "0.42.7";
 
 const VALID_LIVE_PROVIDERS = ["auto", "go2rtc", "mjpeg", "off"];
 const VALID_GO2RTC_MODES = ["webrtc", "mse", "mp4", "hls", "mjpeg"];
@@ -1650,10 +1650,26 @@ class FrigateLlmVisionTimelineCard extends LitElement {
       const items = this._parseFrigateWsArray(rawEvents);
       const reviews = this._parseFrigateWsArray(rawReviews);
       console.info(
-        `[FrigateLLMCard] Frigate WS returned ${items.length} events, ${reviews.length} reviews`,
-        items[0] ? { eventSample: items[0] } : "",
-        reviews[0] ? { reviewSample: reviews[0] } : ""
+        `[FrigateLLMCard] Frigate WS returned ${items.length} events, ${reviews.length} reviews`
       );
+      if (items[0]) {
+        console.info(
+          "[FrigateLLMCard] DUMP eventSample:",
+          JSON.stringify(items[0], null, 2)
+        );
+      }
+      if (reviews[0]) {
+        console.info(
+          "[FrigateLLMCard] DUMP reviewSample[0]:",
+          JSON.stringify(reviews[0], null, 2)
+        );
+      }
+      if (reviews[1]) {
+        console.info(
+          "[FrigateLLMCard] DUMP reviewSample[1]:",
+          JSON.stringify(reviews[1], null, 2)
+        );
+      }
 
       const eventToReviewDesc = new Map();
       for (const r of reviews) {
